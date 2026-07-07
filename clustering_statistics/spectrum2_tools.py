@@ -1826,6 +1826,8 @@ def compute_shotnoise_mesh2_spectrum_fm(
     def _add_sn(poles):
         return poles.map(lambda pole: pole.clone(value=pole.value() + pole.values("shotnoise")))
 
+    jitted_mock_whitenoise = jax.jit(mock_whitenoise, static_argnames=["los"])
+
     get_data_randoms = list(get_data_randoms)  # for mutability
 
     spectrum_regions_zranges = spectrum_regions_zranges or []
@@ -2061,12 +2063,12 @@ def compute_shotnoise_mesh2_spectrum_fm(
             if geo:
                 if jax.process_index() == 0:
                     logger.info("Computing geometry shot noise template with desiwinds...")
-                shotnoises["geometry"] = [mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds]
+                shotnoises["geometry"] = [jitted_mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds]
 
             if ric:
                 if jax.process_index() == 0:
                     logger.info("Computing %s shot noise template with desiwinds...", extra_effects)
-                shotnoises[extra_effects] = [mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds]
+                shotnoises[extra_effects] = [jitted_mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds]
 
             if jax.process_index() == 0:
                 logger.info("desiwinds window computation finished.")
@@ -2187,12 +2189,12 @@ def compute_shotnoise_mesh2_spectrum_fm(
                     if geo:
                         if jax.process_index() == 0:
                             logger.info("Computing geometry shot noise for ell=%i, optimal weights combination %i with desiwinds...", ell, iopt)
-                        shotnoises["geometry"][ell].append([mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds])
+                        shotnoises["geometry"][ell].append([jitted_mock_whitenoise(*_fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds])
 
                     if ric:
                         if jax.process_index() == 0:
                             logger.info("Computing %s shot noise for ell=%i, optimal weights combination %i with desiwinds...", extra_effects, ell, iopt)
-                        shotnoises[extra_effects][ell].append([mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds])
+                        shotnoises[extra_effects][ell].append([jitted_mock_whitenoise(*_fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds])
 
                 for effect in shotnoises:
                     # Sum over weights iteration (ie for cross AxB, sum A_w1 x B_w2 and A_w2 x B_w1) to get the final shot noise for this ell before summing over ells
