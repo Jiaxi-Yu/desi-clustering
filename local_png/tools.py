@@ -675,11 +675,17 @@ def run_profiler(likelihood, fn_output=None):
     compile(likelihood)(best)
 
     if fn_output is not None:
-        if not fn_output.endswith('.h5'):
-            logger.warning(f'Output filename {fn_output} does not end with .h5, skipping.')
-        else:
+        if fn_output.endswith('.h5'):
+            logger.info(f'Saving profiler results to {fn_output}.')
             profiles.write(fn_output)
-            
+        elif fn_output.endswith('.npy'):
+            ## Note: This will be removed after DR2... 
+            logger.info(f'Bestfit values are saved in {fn_output}.')
+            to_save = profiler.profiles.to_stats(tablefmt='list', params=profiler.profiles.choice().params.select().names())[0]
+            np.save(fn_output, to_save)
+        else:
+            logger.warning(f'Output filename {fn_output} should end with .h5, skipping.')
+     
     return profiler
 
 
