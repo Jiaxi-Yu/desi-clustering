@@ -391,7 +391,7 @@ def test_shotnoise_fm(tracer="QSO"):
         "imock": 451,
         "nran": 1,
         "keep_columns": True,
-        "weight": "default-FKP",
+        "weight": "default-fkp-oqe",
     }
     analysis = "png_local"
     mattrs = {"cellsize": 80.0}
@@ -399,13 +399,32 @@ def test_shotnoise_fm(tracer="QSO"):
     options = {
         "catalog": catalog_options,
         "mattrs": mattrs,
-        "mesh2_spectrum": {"optimal_weights": functools.partial(tools.compute_fiducial_png_weights, tracer=tracer)},
-        "shotnoise_mesh2_spectrum_fm": {"n_realizations": 2, "seeds": [42, 84]},
+        "mesh2_spectrum": {
+            "optimal_weights": functools.partial(
+                tools.compute_fiducial_png_weights, tracer=tracer
+            )
+        },
+        "shotnoise_mesh2_spectrum_fm": {
+            "n_realizations": 2,
+            "seeds": [42, 84],
+            "spectrum_regions_zranges": [("NGC", (0.4, 1.1)), ("SGC", (0.4, 1.1))],
+        },
     }
 
     get_stats_fn = functools.partial(tools.get_stats_fn, stats_dir=stats_dir, extra=extra)
     for region in ["NGC", "SGC"]:
-        compute_stats_from_options(["mesh2_spectrum", "shotnoise_mesh2_spectrum_fm"], get_stats_fn=get_stats_fn, **(options | {"catalog": catalog_options | dict(region=region)}), analysis=analysis)
+        compute_stats_from_options(
+            ["mesh2_spectrum"],
+            get_stats_fn=get_stats_fn,
+            **(options | {"catalog": catalog_options | dict(region=region)}),
+            analysis=analysis,
+        )
+    compute_stats_from_options(
+        ["shotnoise_mesh2_spectrum_fm"],
+        get_stats_fn=get_stats_fn,
+        **(options | {"catalog": catalog_options}),
+        analysis=analysis,
+    )
 
 
 def test_count3close():
