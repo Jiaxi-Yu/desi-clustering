@@ -539,7 +539,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['systematic_templates'] = {}
     propose_fiducial['combine_window_mesh2_spectrum'] = {'effect': 'RIC+AMR', 'method': 'spline'}
 
-    if "window_mesh2_spectrum_fm" in kind:
+    if ("window_mesh2_spectrum_fm" in kind) or ("shotnoise_mesh2_spectrum_fm" in kind):
         _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRGxLGE": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
 
         if simple_tracers[0] not in ["BGS", "LRG", "LGE", "ELG", "QSO"]:
@@ -619,6 +619,15 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
                 amr_regions_zranges=list(itertools.product(propose_photoregions[simple_tracers[0]], propose_regression_zranges[simple_tracers[0]])),
             )
 
+    if "shotnoise_mesh2_spectrum_fm" in kind:
+        from copy import deepcopy
+
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"] = deepcopy(propose_fiducial["window_mesh2_spectrum_fm"])
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["batch_size"]
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["unitary_amplitude"]
+
+        propose_sigma = dict.fromkeys(["BGS", "LRG", "LGE", "ELG", "QSO"], 10.0) | dict.fromkeys(["LRGxLGE", "LRGxELG", "LRGxQSO", "ELGxQSO"], (10.0, 10.0))
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"].update(sigma=propose_sigma[simple_tracer])
     return propose_fiducial[kind]
 
 
@@ -788,6 +797,11 @@ def fill_fiducial_options(kwargs, analysis='full_shape'):
         for stat in ['combine_window_mesh2_spectrum', 'rotation_mesh2_spectrum']:
             fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
             options[stat] = fiducial_options | options.get(stat, {})
+        for stat in ["shotnoise_mesh2_spectrum_fm"]:
+            spectrum_options = options[stat.replace("window_", "").replace("_fm", "")]
+            spectrum_options = {key: value for key, value in spectrum_options.items() if key in ["selection_weights", "optimal_weights", "basis"]}
+            fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
+            options[stat] = fiducial_options | spectrum_options | options.get(stat, {})
     return options
 
 
