@@ -1826,7 +1826,7 @@ def compute_shotnoise_mesh2_spectrum_fm(
     def _add_sn(poles):
         return poles.map(lambda pole: pole.clone(value=pole.value() + pole.values("shotnoise")))
 
-    jitted_mock_whitenoise = jax.jit(mock_whitenoise, static_argnames=["los"])
+    jitted_mock_whitenoise = jax.jit(mock_whitenoise, static_argnames=["los", "estimator_weights"])
 
     get_data_randoms = list(get_data_randoms)  # for mutability
 
@@ -2197,8 +2197,9 @@ def compute_shotnoise_mesh2_spectrum_fm(
                         shotnoises[extra_effects][ell].append([jitted_mock_whitenoise(*_fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds])
 
                 for effect in shotnoises:
+                    shotnoises[effect][ell] = jax.tree.map(_add_sn, shotnoises[effect][ell], is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
                     # Sum over weights iteration (ie for cross AxB, sum A_w1 x B_w2 and A_w2 x B_w1) to get the final shot noise for this ell before summing over ells
-                    shotnoises[effect][ell] = jax.tree.map(lambda a, b: _add_sn(a) + _add_sn(b), *shotnoises[effect][ell], is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
+                    shotnoises[effect][ell] = jax.tree.map(sum, *shotnoises[effect][ell], is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
                     # Sum over realizations
                     shotnoises[effect][ell] = {region_zrange: types.mean([shotnoises[effect][ell][ireal][idx] for ireal in range(n_realizations)]) for idx, region_zrange in enumerate(spectrum_regions_zranges)}
                     # Normalize
