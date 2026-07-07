@@ -1699,7 +1699,7 @@ def compute_shotnoise_mesh2_spectrum_fm(
     sigma: jax.Array | tuple[jax.Array, jax.Array],
     optimal_weights: Callable | None,
     data_to_randoms_ratio: float,
-    catalog_split_seed: int,
+    catalog_split_seed: int | list[int],
     geo: bool,
     ric: bool,
     ric_nbins: int | tuple[int, int],
@@ -1731,8 +1731,8 @@ def compute_shotnoise_mesh2_spectrum_fm(
         If ``None``, no optimal weights are applied.
     data_to_randoms_ratio : float
         Population ratio between "data" and "randoms" to pick in the input randoms catalogs. Must be between 0 and 1.
-    catalog_split_seed : int
-        Random seed to use for the random split between "data" and "randoms" in the input randoms catalogs.
+    catalog_split_seed : int | list[int]
+        Random seed to use for the random split between "data" and "randoms" in the input randoms catalogs. If this is a list, the function will iterate over it at the highest level and return the average between runs.
     geo : bool
         Whether to return the sampled window for the geometry. If False, not computed.
     ric : bool
@@ -1770,6 +1770,35 @@ def compute_shotnoise_mesh2_spectrum_fm(
     * Particles loaded by ``get_data_randoms`` but not present in any of ``spectrum_regions_zranges`` are used for observational effects (RIC, AMR, data-to-randoms ratio renormalization...) but not taken into account in power spectrum computations. In general, ``get_data_randoms`` should load the full footprint and range of redshifts available, *including outside the overlap for cross-correlations*.
     * Power spectrum regions/redshift ranges should not overlap. Overlapping regions require separate calls to this function.
     """
+
+    if isinstance(catalog_split_seed, list):
+        shotnoises = [
+            compute_shotnoise_mesh2_spectrum_fm(
+                *get_data_randoms,
+                spectra=spectra,
+                sigma=sigma,
+                optimal_weights=optimal_weights,
+                data_to_randoms_ratio=data_to_randoms_ratio,
+                catalog_split_seed=_catalog_split_seed,
+                geo=geo,
+                ric=ric,
+                ric_nbins=ric_nbins,
+                ric_regions=ric_regions,
+                amr=amr,
+                ellsout=ellsout,
+                regression_maps=regression_maps,
+                templates_paths_kwargs=templates_paths_kwargs,
+                amr_regions_zranges=amr_regions_zranges,
+                spectrum_regions_zranges=spectrum_regions_zranges,
+                total_region_zrange=total_region_zrange,
+                n_realizations=n_realizations,
+                seeds=seeds,
+            )
+            for _catalog_split_seed in catalog_split_seed
+        ]
+        shotnoises = jax.tree.map(lambda *spec: types.mean(list(spec)), *shotnoises, is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
+        return shotnoises
+
     if seeds is not None:
         assert len(seeds) == n_realizations, "If seeds are provided, their number must match n_realizations."
         seeds = [jax.random.key(seed) for seed in seeds]  # cast to scalar jax arrays
