@@ -2209,7 +2209,7 @@ def compute_shotnoise_mesh2_spectrum_fm(
                 logger.info("desiwinds shot noise template computation finished.")
 
             for effect in shotnoises:
-                shotnoises[effect] = {region_zrange: types.join([shotnoises[effect][ill][region_zrange] for ill in ellsout]) for region_zrange in spectrum_regions_zranges}
+                shotnoises[effect] = {region_zrange: types.Mesh2SpectrumPoles([shotnoises[effect][ill][region_zrange] for ill in ellsout], ellsout) for region_zrange in spectrum_regions_zranges}
 
         return shotnoises
 
