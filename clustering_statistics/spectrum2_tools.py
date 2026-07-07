@@ -1693,6 +1693,554 @@ def compute_window_mesh2_spectrum_fm(
 
         return windows
 
+def compute_shotnoise_mesh2_spectrum_fm(
+    *get_data_randoms: Callable,
+    spectra: list[types.Mesh2SpectrumPoles],
+    sigma: jax.Array | tuple[jax.Array, jax.Array],
+    optimal_weights: Callable | None,
+    data_to_randoms_ratio: float,
+    catalog_split_seed: int | list[int],
+    geo: bool,
+    ric: bool,
+    ric_nbins: int | tuple[int, int],
+    ric_regions: list[str] | tuple[list[str], list[str]],
+    amr: bool,  # is optional
+    ellsout: list[int] | None,
+    regression_maps: list[str] | tuple[list[str], list[str]] | None,
+    templates_paths_kwargs: dict | tuple[dict, dict] | None,
+    amr_regions_zranges: list[tuple[str, tuple[float, float]]] | tuple[list[tuple[str, tuple[float, float]]], list[tuple[str, tuple[float, float]]]] | None,
+    spectrum_regions_zranges: list[str] | None,
+    total_region_zrange: tuple[str, tuple[float, float]],
+    n_realizations: int,
+    seeds: list[int] | None,
+) -> dict[str, dict[str, types.Mesh2SpectrumPoles]]:
+    """
+    Compute a power spectrum shot noise template including RIC and/or AMR with :mod:`desiwinds`.
+
+    Parameters
+    ----------
+    *get_data_randoms : Callable
+        Functions that return tuples of (data, randoms) catalogs.
+    spectra: list[types.Mesh2SpectrumPoles]
+        Measured 2-point spectrum multipoles. Only used for their attributes (binning, norm, wsum...), not their values.
+    optimal_weights : Callable or None
+        Function taking (ell, catalog) as input and returning total weights to apply to data and randoms.
+        It can have an optional attribute 'columns' that specifies which additional columns are needed to compute the optimal weights.
+        As a default, ``optimal_weights.columns = ['Z']`` to indicate that redshift information is needed.
+        A dictionary ``catalog`` of columns is provided, containing 'INDWEIGHT' and the requested columns.
+        If ``None``, no optimal weights are applied.
+    data_to_randoms_ratio : float
+        Population ratio between "data" and "randoms" to pick in the input randoms catalogs. Must be between 0 and 1.
+    catalog_split_seed : int | list[int]
+        Random seed to use for the random split between "data" and "randoms" in the input randoms catalogs. If this is a list, the function will iterate over it at the highest level and return the average between runs.
+    geo : bool
+        Whether to return the sampled window for the geometry. If False, not computed.
+    ric : bool
+        Wether to return the sampled window for the geometry + RIC (+/- AMR if amr=True). If False, not computed.
+    ric_nbins : int | tuple[int, int]
+        Number of radial bins to use for the RIC. Can provide as tuple for cross-spectra.
+    ric_regions : list[str] | tuple[list[str], list[str]]
+        Regions to use for the RIC, e.g. ``["N", "S"]`` or ``["N", "SnoDES", "DES]``. Can provide as tuple for cross-spectra.
+    amr : bool
+        Whether to apply the angular mode removal (AMR), i.e. to forward model the power loss due to linear angular systematics weights.
+    ellsout : list[int] | None
+        For which ells the window is computed. Default None and use ellsout extracted from corresponding power spectra. Useful to split the computation.
+    regression_maps : list[str] | tuple[list[str], list[str]] | None
+        Names of the systematics templates to use for the AMR. Can be set to ``None`` if ``amr=False``. Can provide as tuple for cross-spectra.
+    templates_paths_kwargs : dict | tuple[dict, dict] | None
+        Keyword arguments to pass to the function loading the templates maps, e.g. paths to the templates files, EBV map, nside, etc. Not needed if ``amr=False``. Must at least contain the keys ``templates_path_N`` and ``templates_path_S`` with the paths to the templates files for the Northern and Southern regions, respectively. Can (must) provide as tuple for cross-spectra.
+    amr_regions_zranges : list[tuple[str, tuple[float, float]]] | tuple[list[tuple[str, tuple[float, float]]], list[tuple[str, tuple[float, float]]]] | None
+        Regions where to apply the regressions for the AMR, and corresponding redshift ranges. Can be set to ``None`` if ``amr=False``. Can provide as tuple for cross-spectra.
+    spectrum_regions_zranges : list[tuple[str, tuple[float, float]]] | None
+        Regions for which to compute the window and power spectrum, along with their corresponding redshift ranges. If ``None``, the whole catalog is used as one region. Typically ``[("NGC", (zmin, zmax)), ("SGC", (zmin, zmax))]``.
+    total_region_zrange : tuple[str, tuple[float, float]]
+        Total region and redshift range to use for the forward model (but not necessarily the spectra). Should at least encompass all the spectrum regions. Should generally be ("ALL", (zmin, zmax)) with the full redshift range of the tracer, with some exceptions for cross-correlations.
+    n_realizations : int
+        Number of realizations to compute.
+    seeds : list[int] | None
+        Seeds to use for each realization. If ``None``, defaults to ``2 * i_realization + 3``.
+
+    Returns
+    -------
+    dict[str, dict[str, list[lsstypes.Mesh2SpectrumPoles]]]
+        Dictionary, per effect included (geometry, RIC, RIC+AMR) and per region, of shot noise template (already averaged).
+
+    Notes
+    -----
+    * Particles loaded by ``get_data_randoms`` but not present in any of ``spectrum_regions_zranges`` are used for observational effects (RIC, AMR, data-to-randoms ratio renormalization...) but not taken into account in power spectrum computations. In general, ``get_data_randoms`` should load the full footprint and range of redshifts available, *including outside the overlap for cross-correlations*.
+    * Power spectrum regions/redshift ranges should not overlap. Overlapping regions require separate calls to this function.
+    """
+
+    if isinstance(catalog_split_seed, list):
+        shotnoises = [
+            compute_shotnoise_mesh2_spectrum_fm(
+                *get_data_randoms,
+                spectra=spectra,
+                sigma=sigma,
+                optimal_weights=optimal_weights,
+                data_to_randoms_ratio=data_to_randoms_ratio,
+                catalog_split_seed=_catalog_split_seed,
+                geo=geo,
+                ric=ric,
+                ric_nbins=ric_nbins,
+                ric_regions=ric_regions,
+                amr=amr,
+                ellsout=ellsout,
+                regression_maps=regression_maps,
+                templates_paths_kwargs=templates_paths_kwargs,
+                amr_regions_zranges=amr_regions_zranges,
+                spectrum_regions_zranges=spectrum_regions_zranges,
+                total_region_zrange=total_region_zrange,
+                n_realizations=n_realizations,
+                seeds=seeds,
+            )
+            for _catalog_split_seed in catalog_split_seed
+        ]
+        shotnoises = jax.tree.map(lambda *spec: types.mean(list(spec)), *shotnoises, is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
+        return shotnoises
+
+    if seeds is not None:
+        assert len(seeds) == n_realizations, "If seeds are provided, their number must match n_realizations."
+        seeds = [jax.random.key(seed) for seed in seeds]  # cast to scalar jax arrays
+    else:
+        seeds = [jax.random.key(3 * i + 87) for i in range(n_realizations)]
+
+    # Notes to self:
+    # * RIC not optional
+    # * n_randoms is effectively set by the length of get_data_randoms
+
+    import mpytools as mpy
+    from desiwinds.forward import mock_whitenoise, prepare_AMR, prepare_RIC
+    from jaxpower import BinMesh2SpectrumPoles, FKPField, ParticleField, create_sharding_mesh
+
+    from .tools import add_photometric_template_values, select_region
+
+    def _add_photometric_template_values(catalogs: dict[str, mpy.Catalog], regression_maps, templates_paths_kwargs):
+        return {name: add_photometric_template_values(catalogs[name], regression_maps, **templates_paths_kwargs) for name in catalogs}
+
+    def _select_region_zrange(catalogs: dict[str, mpy.Catalog], spectrum_region_zrange: tuple[str, tuple[float, float]]) -> dict[str, mpy.Catalog]:
+        spectrum_region, zrange = spectrum_region_zrange
+        # Mimic read_clustering_catalog: <= on lower, < on upper
+        return {name: cat[select_region(ra=cat["RA"], dec=cat["DEC"], region=spectrum_region) & (cat["Z"] >= zrange[0]) & (cat["Z"] < zrange[1])] for name, cat in catalogs.items()}
+
+    def _select_region_zrange_complement(catalogs: dict[str, mpy.Catalog]) -> dict[str, mpy.Catalog]:
+        """Select objects outside the spectrum regions and redshift ranges, but inside the total region and redshift range."""
+        total_region, total_zrange = total_region_zrange
+        catalogs = dict(catalogs)
+        for name, cat in catalogs.items():
+            mask = False
+            for spectrum_region, zrange in spectrum_regions_zranges:
+                mask |= select_region(ra=cat["RA"], dec=cat["DEC"], region=spectrum_region) & (cat["Z"] >= zrange[0]) & (cat["Z"] < zrange[1])
+            mask = (~mask) & (select_region(ra=cat["RA"], dec=cat["DEC"], region=total_region) & (cat["Z"] >= total_zrange[0]) & (cat["Z"] < total_zrange[1]))
+            catalogs[name] = cat[mask]
+        return catalogs
+
+    def _loadbalance(catalogs: dict[str, mpy.Catalog]) -> dict[str, mpy.Catalog]:
+        return {name: catalog.all_to_all() for name, catalog in catalogs.items()}
+
+    def _split_data_randoms(catalogs: dict[str, mpy.Catalog]) -> dict[str, mpy.Catalog]:
+        """Split the randoms into "data" and "randoms" based on the provided ratio. Overwrite original "data"."""
+        randoms = catalogs["randoms"]
+        data_csize = int(data_to_randoms_ratio * randoms.csize)
+        randoms_csize = randoms.csize - data_csize
+        rng = mpy.random.MPIRandomState(seed=catalog_split_seed, size=randoms.size)  # Use local sizes
+        mask_is_data = rng.uniform() < (data_csize / (data_csize + randoms_csize))
+        data = randoms[mask_is_data]
+        randoms = randoms[~mask_is_data]
+        return {"data": data, "randoms": randoms}
+
+    def _safe_divide(a, b):
+        return jnp.where(b != 0, a / b, 0.0)
+
+    def _add_sn(poles):
+        return poles.map(lambda pole: pole.clone(value=pole.value() + pole.values("shotnoise")))
+
+    jitted_mock_whitenoise = jax.jit(mock_whitenoise, static_argnames=["los", "estimator_weights"])
+
+    get_data_randoms = list(get_data_randoms)  # for mutability
+
+    spectrum_regions_zranges = spectrum_regions_zranges or []
+    columns_optimal_weights = []
+    if optimal_weights is not None:  # FIXME should this be doubled up for cross-spectra?
+        columns_optimal_weights += getattr(optimal_weights, "columns", [])  # to compute optimal weights, e.g. for fnl
+
+    ntracers = len(get_data_randoms)
+
+    if (not isinstance(sigma, tuple)) or len(sigma) == 1:
+        assert ntracers == 1, "For auto-correlations (even with optimal weights), provide one sigma value only."
+
+    # Double up parameters for RIC/AMR if not already provided as tuples
+    def is_sequence(item):
+        return isinstance(item, (list, tuple))
+
+    if not is_sequence(ric_nbins):
+        ric_nbins = (ric_nbins,) * ntracers
+    if not is_sequence(ric_regions):
+        ric_regions = [ric_regions]
+    if isinstance(ric_regions[0], str):
+        ric_regions = (ric_regions,) * ntracers
+    all_regression_maps = None
+    if regression_maps is not None:
+        if not is_sequence(regression_maps):
+            regression_maps = [regression_maps]
+        if isinstance(regression_maps[0], str):
+            regression_maps = (regression_maps,) * ntracers
+        all_regression_maps = {}
+        for regression_map in regression_maps:
+            all_regression_maps |= dict.fromkeys(regression_map)
+        all_regression_maps = list(all_regression_maps)
+    if templates_paths_kwargs is not None and not is_sequence(templates_paths_kwargs):
+        templates_paths_kwargs = (templates_paths_kwargs,) * ntracers
+    if amr_regions_zranges is not None:
+        if not is_sequence(amr_regions_zranges[0]):
+            amr_regions_zranges = [amr_regions_zranges]
+        if isinstance(amr_regions_zranges[0][0], str):
+            amr_regions_zranges = (amr_regions_zranges,) * ntracers
+
+    # Recover output and mesh information from the observable spectrum
+    ellsout = ellsout or spectra[0].ells
+    los = spectra[0].attrs["los"]  # this has to match with theory input
+    if los in ["endpoint", "firstpoint"]:
+        los = "local"
+    # Input power spectrum may be computed in a single region only (NGC), so boxcenter is probably wrong
+    mattrs = {name: spectra[0].attrs[name] for name in ["boxsize", "meshsize"]}
+
+    with create_sharding_mesh(meshsize=mattrs.get("meshsize", None)):
+        if amr:  # Add photometric template values to the catalogs, if AMR is applied, as they are needed for the regression
+            # _templates_paths_kwargs depends on the tracer, so do this before further changing get_data_randoms
+            # load all regression maps (i.e. for both tracers in case of cross-correlation) ; this simplifies things greatly and useless ones will be dropped later to save memory
+            for itracer, (_get_data_randoms, _templates_paths_kwargs) in enumerate(zip(get_data_randoms, templates_paths_kwargs, strict=True)):
+
+                def wrap(f):
+                    return lambda: _add_photometric_template_values(f(), all_regression_maps, _templates_paths_kwargs)
+
+                get_data_randoms[itracer] = wrap(_get_data_randoms)
+
+        # Split into "data" and randoms based on the provided ratio
+        def wrap(f):
+            return lambda: _loadbalance(_split_data_randoms(f()))
+
+        get_data_randoms = [wrap(_get_data_randoms) for _get_data_randoms in get_data_randoms]
+
+        if len(spectrum_regions_zranges) > 0:
+            # Also get particles that might not be in the region selection
+            def wrap(f):
+                return lambda: _loadbalance(_select_region_zrange_complement(f()))
+
+            get_extra_data_randoms = [wrap(_get_data_randoms) for _get_data_randoms in get_data_randoms]
+
+            # Split catalogs into pk regions, if specified
+
+            def wrap(f, spectrum_region):
+                return lambda: _loadbalance(_select_region_zrange(f(), spectrum_region))
+
+            get_data_randoms = [
+                wrap(_get_data_randoms, spectrum_region_zrange) for spectrum_region_zrange in spectrum_regions_zranges for _get_data_randoms in get_data_randoms
+            ]  # [func1_region1, func2_region1, func3_region1 ... func1_region2, func2_region2, func3_region2 ...]
+        else:
+            get_extra_data_randoms = []
+
+        all_particles = prepare_jaxpower_particles(
+            *get_data_randoms,
+            mattrs=mattrs,
+            add_randoms=["IDS", "WEIGHT_FKP", "Z", *columns_optimal_weights] + (all_regression_maps if amr else []),
+            add_data=["WEIGHT_FKP", "Z", *columns_optimal_weights] + (all_regression_maps if amr else []),
+        )
+        mattrs = all_particles[0]["randoms"].attrs
+
+        if get_extra_data_randoms:
+            extra_particles = prepare_jaxpower_particles(
+                *get_extra_data_randoms,
+                mattrs=mattrs,
+                add_randoms=["IDS", "WEIGHT_FKP", "Z", *columns_optimal_weights] + (all_regression_maps if amr else []),
+                add_data=["WEIGHT_FKP", "Z", *columns_optimal_weights] + (all_regression_maps if amr else []),
+                check=False,  # these particles will be outside mattrs but it doesn't matter
+            )
+        else:
+            extra_particles = []
+
+        all_randoms = [particles["randoms"] for particles in all_particles]
+        all_data = [particles["data"] for particles in all_particles]
+        # Extra data and randoms are needed for observational effects but shouldn't be in spectrum computations
+        extra_data = [particles["data"] for particles in extra_particles]
+        extra_randoms = [particles["randoms"] for particles in extra_particles]
+        del all_particles, extra_particles
+
+        # Make into len(spectrum_regions) catalogs if split into spectrum regions, otherwise one catalog
+        nregion = len(spectrum_regions_zranges) if len(spectrum_regions_zranges) > 0 else 1
+        nrandoms = len(all_randoms)
+        ntracers = nrandoms // nregion
+        all_randoms = [[all_randoms[ntracers * i + itracer] for itracer in range(ntracers)] for i in range(nregion)]
+        all_data = [[all_data[ntracers * i + itracer] for itracer in range(ntracers)] for i in range(nregion)]
+        # [[tracer1_region1, tracer2_region1, ...], [tracer1_region2, tracer2_region2, ...], ...]
+
+        for iregion in range(nregion):
+            for itracer in range(len(all_randoms[iregion])):
+                # Randoms
+                extra = all_randoms[iregion][itracer].extra
+                if amr:
+                    extra.update({"template_values": jnp.stack([extra.pop(map_name) for map_name in regression_maps[itracer]], axis=-1)})
+                    for map in set(all_regression_maps) - set(regression_maps[itracer]):
+                        del extra[map]  # remove maps not used for this tracer to save memory
+                # extra already has weight_FKP, just remove from weights=indweights which contains FKP weights
+                all_randoms[iregion][itracer] = all_randoms[iregion][itracer].clone(extra=extra, weights=_safe_divide(all_randoms[iregion][itracer].weights, extra["WEIGHT_FKP"]))
+
+                # Data
+                extra = all_data[iregion][itracer].extra
+                if amr:
+                    extra.update({"template_values": jnp.stack([extra.pop(map_name) for map_name in regression_maps[itracer]], axis=-1)})
+                    for map in set(all_regression_maps) - set(regression_maps[itracer]):
+                        del extra[map]  # remove maps not used for this tracer to save memory
+                all_data[iregion][itracer] = all_data[iregion][itracer].clone(extra=extra, weights=_safe_divide(all_data[iregion][itracer].weights, extra["WEIGHT_FKP"]))
+        del extra
+
+        # Add extra data and randoms with WEIGHT_FKP = 0 to avoid them contributing to the window computation, but still have actual weights in RIC/AMR
+        for itracer in range(ntracers):
+            # Randoms
+            extra = extra_randoms[itracer].extra
+            if amr:
+                extra.update({"template_values": jnp.stack([extra.pop(map_name) for map_name in regression_maps[itracer]], axis=-1)})
+                for map in set(all_regression_maps) - set(regression_maps[itracer]):
+                    del extra[map]  # remove maps not used for this tracer to save memory
+            # Isolate weights and set WEIGHT_FKP to 0
+            extra_randoms[itracer] = extra_randoms[itracer].clone(extra=extra | {"WEIGHT_FKP": jnp.zeros_like(extra["WEIGHT_FKP"])}, weights=_safe_divide(extra_randoms[itracer].weights, extra["WEIGHT_FKP"]))
+            # Concatenate to first randoms catalog for this tracer
+            all_randoms[0][itracer] = ParticleField.concatenate([all_randoms[0][itracer], extra_randoms[itracer]], local=True)
+
+            # Data
+            extra = extra_data[itracer].extra
+            if amr:
+                extra.update({"template_values": jnp.stack([extra.pop(map_name) for map_name in regression_maps[itracer]], axis=-1)})
+                for map in set(all_regression_maps) - set(regression_maps[itracer]):
+                    del extra[map]  # remove maps not used for this tracer to save memory
+            # Isolate weights and set WEIGHT_FKP to 0
+            extra_data[itracer] = extra_data[itracer].clone(extra=extra | {"WEIGHT_FKP": jnp.zeros_like(extra["WEIGHT_FKP"])}, weights=_safe_divide(extra_data[itracer].weights, extra["WEIGHT_FKP"]))
+            # Concatenate to first data catalog for this tracer
+            all_data[0][itracer] = ParticleField.concatenate([all_data[0][itracer], extra_data[itracer]], local=True)
+        del extra, extra_randoms, extra_data
+
+        if jax.process_index() == 0:
+            logger.info("Catalogs ready, starting preparation...")
+
+        # Prepare arguments for the window computation function
+        ric_argss = []
+        for itracer, (data_tracer, randoms_tracer) in enumerate(zip(zip(*all_data, strict=True), zip(*all_randoms, strict=True), strict=True)):
+            ric_argss.append(prepare_RIC(data=data_tracer, randoms=randoms_tracer, regions=ric_regions[itracer], n_bins=ric_nbins[itracer], apply_to="randoms"))
+        ric_argss = tuple(ric_argss)
+
+        if amr:
+            extra_effects = "RIC+AMR"
+            amr_argss = []
+            for itracer, (data_tracer, randoms_tracer) in enumerate(zip(zip(*all_data, strict=True), zip(*all_randoms, strict=True), strict=True)):
+                amr_argss.append(prepare_AMR(data=data_tracer, randoms=randoms_tracer, regions_zranges=amr_regions_zranges[itracer], apply_to="randoms"))
+            amr_argss = tuple(amr_argss)
+
+            def delete_template_values(particles):
+                extra = particles.extra
+                del extra["template_values"]
+                return particles.clone(extra=extra)
+
+            all_data = [[delete_template_values(particles) for particles in data_region] for data_region in all_data]
+            all_randoms = [[delete_template_values(particles) for particles in randoms_region] for randoms_region in all_randoms]
+        else:
+            extra_effects = "RIC"
+            amr_argss = None
+
+        # Turn into FKP fields
+        fkp_fields = [[FKPField(data=d, randoms=r, attrs=mattrs) for d, r in zip(data_region, randoms_region, strict=True)] for data_region, randoms_region in zip(all_data, all_randoms, strict=True)]
+
+        del all_data, all_randoms
+
+        if optimal_weights is None:
+            if jax.process_index() == 0:
+                logger.info("Using FKP weights.")
+            # Using FKP weights which are symetrical, so this remains an autocorr
+            binner = BinMesh2SpectrumPoles(mattrs, edges=spectra[0].get(0).edges("k"), ells=ellsout)
+            # get norms from input spectrum
+            fkp_norms = [jnp.concatenate([spectrum.get(ell).values("norm") for ell in ellsout], axis=0) for spectrum in spectra]
+
+            # Renormalize data and randoms to input spectrum
+            for iregion, (spectrum, fkps) in enumerate(zip(spectra, fkp_fields, strict=True)):
+                # autocorrelation and FKP: component [0, 0]
+                # autocorrelation and FKP: component [0, itracer]
+                for itracer, fkp in enumerate(fkps):
+                    # FIXME I think min(itracer, ntracers - 1) always equal to itracer ??
+                    alphad = spectrum.get(0).attrs["wsum_data"][0][min(itracer, ntracers - 1)] / (fkp.data.weights * fkp.data.extra["WEIGHT_FKP"]).sum()
+                    alphar = spectrum.get(0).attrs["wsum_randoms"][0][min(itracer, ntracers - 1)] / (fkp.randoms.weights * fkp.randoms.extra["WEIGHT_FKP"]).sum()
+                    fkp_fields[iregion][itracer] = fkp.clone(
+                        data=fkp.data.clone(weights=fkp.data.weights * alphad),
+                        randoms=fkp.randoms.clone(weights=fkp.randoms.weights * alphar),
+                    )
+
+            # Needed list of lists for mutability before. Now switch to list of tuples to respect FM input signature
+            fkp_fields = [tuple(fkp_region) for fkp_region in fkp_fields]
+
+            ## FM based computations
+            shotnoises = {}
+
+            mock_whitenoise_kwargs = {
+                "sigma": sigma,
+                "los": los,
+                "nam_args": None,
+                "fkp_norms": fkp_norms,
+                "binner": binner,
+                "estimator_weights": "WEIGHT_FKP",
+                "data_regions": tuple(ric_arg.data_regions for ric_arg in ric_argss),
+                "randoms_regions": tuple(ric_arg.randoms_regions for ric_arg in ric_argss),
+            }
+
+            if geo:
+                if jax.process_index() == 0:
+                    logger.info("Computing geometry shot noise template with desiwinds...")
+                shotnoises["geometry"] = [jitted_mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds]
+
+            if ric:
+                if jax.process_index() == 0:
+                    logger.info("Computing %s shot noise template with desiwinds...", extra_effects)
+                shotnoises[extra_effects] = [jitted_mock_whitenoise(*fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds]
+
+            if jax.process_index() == 0:
+                logger.info("desiwinds window computation finished.")
+
+            for effect in shotnoises:
+                shotnoises[effect] = {region_zrange: types.mean([_add_sn(shotnoises[effect][ireal][idx]) for ireal in range(n_realizations)]) for idx, region_zrange in enumerate(spectrum_regions_zranges)}
+
+        else:
+            # Optimal weights: non symmetrical, so need to compute "cross-correlation" (same tracer, different weights) + not the same for all ells
+            # If actual cross-spectra, need to compute A_w1 x B_w2 and A_w2 x B_w1 -> double the amount of spectra as well (and for each ell)
+            # Proceed ell per ell and sum the windows at the end
+            if jax.process_index() == 0:
+                logger.info("Using optimal weights.")
+
+            # Double up RIC/AMR arguments even for auto-spectra to simplify the logic in the FM call
+            if len(ric_argss) == 1:
+                ric_argss = ric_argss * 2
+                if amr:
+                    amr_argss = amr_argss * 2
+
+            # Prepare optimal weigts generators with same structure as fkp_fields
+            optimal_weights_data = [
+                lambda ell, fkp_region=fkp_region: optimal_weights(  # use default to avoid late binding in the loop
+                    ell,
+                    [({column: fkp_field.data.extra[column] for column in ["Z", *columns_optimal_weights]} | {"INDWEIGHT": fkp_field.data.weights * fkp_field.data.extra["WEIGHT_FKP"]}) for fkp_field in fkp_region],
+                )
+                for fkp_region in fkp_fields
+            ]
+            optimal_weights_randoms = [
+                lambda ell, fkp_region=fkp_region: optimal_weights(  # use default to avoid late binding in the loop
+                    ell,
+                    [({column: fkp_field.randoms.extra[column] for column in ["Z", *columns_optimal_weights]} | {"INDWEIGHT": fkp_field.randoms.weights * fkp_field.randoms.extra["WEIGHT_FKP"]}) for fkp_field in fkp_region],
+                )
+                for fkp_region in fkp_fields
+            ]
+
+            def _attach_weights(fkp_region: tuple[FKPField], data_w1, data_w2, randoms_w1, randoms_w2):
+                """
+                Attach optimal weights to FKP fields in fields `'optimal_1'` and `'optimal_2'` for data and randoms.
+
+                If the input fkp_region contains one tracer, both optimal weights are attached to the same tracer and the field is duplicated to have a length 2 output.
+                If the input fkp_region contains two tracers, the first optimal weight is attached to the first tracer and the second optimal weight to the second tracer.
+                """
+                # These weights also contain real weights and FKP weights ; need to remove the real weights to isolate the "estimator weights" to apply at computation time in the FM
+                if len(fkp_region) == 1:
+                    return (
+                        fkp_region[0].clone(
+                            data=fkp_region[0].data.clone(extra=fkp_region[0].data.extra | {"weight_optimal_1": _safe_divide(data_w1, fkp_region[0].data.weights), "weight_optimal_2": _safe_divide(data_w2, fkp_region[0].data.weights)}),
+                            randoms=fkp_region[0].randoms.clone(
+                                extra=fkp_region[0].randoms.extra
+                                | {
+                                    "weight_optimal_1": _safe_divide(randoms_w1, fkp_region[0].randoms.weights),
+                                    "weight_optimal_2": _safe_divide(randoms_w2, fkp_region[0].randoms.weights),
+                                }
+                            ),
+                        ),
+                    ) * 2
+                elif len(fkp_region) == 2:
+                    return (
+                        fkp_region[0].clone(
+                            data=fkp_region[0].data.clone(extra=fkp_region[0].data.extra | {"weight_optimal_1": _safe_divide(data_w1, fkp_region[0].data.weights)}),
+                            randoms=fkp_region[0].randoms.clone(extra=fkp_region[0].randoms.extra | {"weight_optimal_1": _safe_divide(randoms_w1, fkp_region[0].randoms.weights)}),
+                        ),
+                        fkp_region[1].clone(
+                            data=fkp_region[1].data.clone(extra=fkp_region[1].data.extra | {"weight_optimal_2": _safe_divide(data_w2, fkp_region[1].data.weights)}),
+                            randoms=fkp_region[1].randoms.clone(extra=fkp_region[1].randoms.extra | {"weight_optimal_2": _safe_divide(randoms_w2, fkp_region[1].randoms.weights)}),
+                        ),
+                    )
+                else:
+                    raise ValueError(f"Unexpected number of tracers in fkp_region: {len(fkp_region)}")
+
+            shotnoises: dict[str, dict[int, list]] = {}
+            if geo:
+                shotnoises["geometry"] = {ell: [] for ell in ellsout}
+            if ric:
+                shotnoises[extra_effects] = {ell: [] for ell in ellsout}
+
+            for ell in ellsout:
+                binner = BinMesh2SpectrumPoles(fkp_fields[0][0].attrs, edges=spectra[0].get(ell).edges("k"), ells=[ell])  # TODO: check edges are ok
+                # Recover FKP normalization for each region and this ell only from input spectrum
+                fkp_norms = [jnp.concatenate([spectrum.get(ill).values("norm") for ill in [ell]], axis=0) for spectrum in spectra]
+
+                for iopt, optweights in enumerate(zip(*[owd(ell) for owd in optimal_weights_data], *[owr(ell) for owr in optimal_weights_randoms], strict=True)):
+                    # This loop will iterate once for auto and twice for cross (A_w1 x B_w2 and A_w2 x B_w1)
+                    # _fkp_fields lists length 2 tuples (that might be one field duplicated for auto) with the optimal weights attached in the extra
+                    _fkp_fields = [_attach_weights(fkp_region, *optweights[iregion], *optweights[nregion + iregion]) for iregion, fkp_region in enumerate(fkp_fields)]
+
+                    # Renormalize data and randoms to input spectrum
+                    for iregion, (spectrum, (fkp1, fkp2)) in enumerate(zip(spectra, _fkp_fields, strict=True)):
+                        # OQE auto AxA: [[w1sum_A, w2sum_A]] | OQE cross AxB: [[w1sum_A, w2sum_B], [w2sum_A, w1sum_B]]
+                        alphad1 = spectrum.get(ell).attrs["wsum_data"][iopt][0] / fkp1.data.clone(weights=fkp1.data.weights * fkp1.data.extra["weight_optimal_1"]).weights.sum()
+                        alphad2 = spectrum.get(ell).attrs["wsum_data"][iopt][1] / fkp2.data.clone(weights=fkp2.data.weights * fkp2.data.extra["weight_optimal_2"]).weights.sum()
+                        alphar1 = spectrum.get(ell).attrs["wsum_randoms"][iopt][0] / fkp1.randoms.clone(weights=fkp1.randoms.weights * fkp1.randoms.extra["weight_optimal_1"]).weights.sum()
+                        alphar2 = spectrum.get(ell).attrs["wsum_randoms"][iopt][1] / fkp2.randoms.clone(weights=fkp2.randoms.weights * fkp2.randoms.extra["weight_optimal_2"]).weights.sum()
+                        # Renormalize the optimal weights so that the final mesh is properly normalized
+                        _fkp_fields[iregion] = (
+                            fkp1.clone(
+                                data=fkp1.data.clone(weights=fkp1.data.weights * alphad1),
+                                randoms=fkp1.randoms.clone(weights=fkp1.randoms.weights * alphar1),
+                            ),
+                            fkp2.clone(
+                                data=fkp2.data.clone(weights=fkp2.data.weights * alphad2),
+                                randoms=fkp2.randoms.clone(weights=fkp2.randoms.weights * alphar2),
+                            ),
+                        )
+
+                    mock_whitenoise_kwargs = {
+                        "sigma": sigma,
+                        "los": los,
+                        "nam_args": None,
+                        "fkp_norms": [jnp.ones_like(fkp_norm) for fkp_norm in fkp_norms],  # will renormalize manually when summing
+                        "binner": binner,  # one ell only
+                        "estimator_weights": ("weight_optimal_1", "weight_optimal_2"),
+                        "data_regions": tuple(ric_arg.data_regions for ric_arg in ric_argss),
+                        "randoms_regions": tuple(ric_arg.randoms_regions for ric_arg in ric_argss),
+                    }
+
+                    if geo:
+                        if jax.process_index() == 0:
+                            logger.info("Computing geometry shot noise for ell=%i, optimal weights combination %i with desiwinds...", ell, iopt)
+                        shotnoises["geometry"][ell].append([jitted_mock_whitenoise(*_fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})) for seed in seeds])
+
+                    if ric:
+                        if jax.process_index() == 0:
+                            logger.info("Computing %s shot noise for ell=%i, optimal weights combination %i with desiwinds...", extra_effects, ell, iopt)
+                        shotnoises[extra_effects][ell].append([jitted_mock_whitenoise(*_fkp_fields, seed=seed, **(mock_whitenoise_kwargs | {"ric_args": ric_argss, "amr_args": amr_argss})) for seed in seeds])
+
+                for effect in shotnoises:
+                    shotnoises[effect][ell] = jax.tree.map(_add_sn, shotnoises[effect][ell], is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
+                    # Sum over weights iteration (ie for cross AxB, sum A_w1 x B_w2 and A_w2 x B_w1) to get the final shot noise for this ell before summing over ells
+                    shotnoises[effect][ell] = jax.tree.map(sum, *shotnoises[effect][ell], is_leaf=lambda x: isinstance(x, types.Mesh2SpectrumPoles))
+                    # Sum over realizations
+                    shotnoises[effect][ell] = {region_zrange: types.mean([shotnoises[effect][ell][ireal][idx] for ireal in range(n_realizations)]) for idx, region_zrange in enumerate(spectrum_regions_zranges)}
+                    # Normalize
+                    shotnoises[effect][ell] = {region_zrange: spec.clone(value=spec.value() / norm) for (region_zrange, spec), norm in zip(shotnoises[effect][ell].items(), fkp_norms, strict=True)}
+
+            if jax.process_index() == 0:
+                logger.info("desiwinds shot noise template computation finished.")
+
+            for effect in shotnoises:
+                shotnoises[effect] = {region_zrange: types.Mesh2SpectrumPoles([shotnoises[effect][ill][region_zrange] for ill in ellsout], ellsout) for region_zrange in spectrum_regions_zranges}
+
+        return shotnoises
 
 def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: types.WindowMatrix, select: dict=None, theory: str='rept', update_params=None, out: types.Mesh2SpectrumPoles=None):
     """

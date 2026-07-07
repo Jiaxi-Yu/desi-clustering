@@ -35,7 +35,16 @@ from .catalog_blinding import bao as catalog_bao_blinding
 from .catalog_blinding import lss_catalogs as catalog_lss
 
 from .correlation2_tools import compute_particle2_angular_upweights, compute_particle2_correlation, compute_particle2_correlation_close_pair_correction, compute_covariance_particle2_correlation
-from .spectrum2_tools import (compute_mesh2_spectrum, compute_mesh2_spectrum_close_pair_correction, compute_window_mesh2_spectrum, compute_covariance_mesh2_spectrum, run_preliminary_fit_mesh2_spectrum, compute_rotation_mesh2_spectrum, compute_window_mesh2_spectrum_fm)
+from .spectrum2_tools import (
+    compute_mesh2_spectrum,
+    compute_mesh2_spectrum_close_pair_correction,
+    compute_window_mesh2_spectrum,
+    compute_covariance_mesh2_spectrum,
+    run_preliminary_fit_mesh2_spectrum,
+    compute_rotation_mesh2_spectrum,
+    compute_window_mesh2_spectrum_fm,
+    compute_shotnoise_mesh2_spectrum_fm,
+)
 
 from .correlation3_tools import compute_particle3_angular_upweights, compute_particle3_correlation, compute_particle3_correlation_close_pair_correction
 from .spectrum3_tools import compute_mesh3_spectrum, compute_window_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction
@@ -773,6 +782,49 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
 
                             options = fn_window_options | {"extra": extra, "region": _region, "zrange": _zrange}
                             write_stats(get_stats_fn(kind=stat, catalog=fn_catalog_options, **options), window[effect][(_region, _zrange)][i])
+
+                # synchronize here to avoid postprocess trying to load windows that haven't been written yet
+                jax.experimental.multihost_utils.sync_global_devices("window_fm_IO")  # wait for the writer
+
+        # Shot noise template using forward model (for RIC and AMR effects)
+        funcs = {"shotnoise_mesh2_spectrum_fm": compute_shotnoise_mesh2_spectrum_fm}
+        for stat, func in funcs.items():
+            if stat in stats:
+                # len(tracers) == 1 if autocorr, else 2
+                shotnoise_options = dict(options[stat])
+                selection_weights = shotnoise_options.pop("selection_weights", None)
+
+                def get_data(tracer, selection_weights=selection_weights):
+                    # Prepare randoms for forward model window computation
+                    toret = {"data": data[tracer], "randoms": Catalog.concatenate(randoms[tracer])}
+                    if selection_weights:
+                        toret = {name: selection_weights[tracer](catalog) for name, catalog in toret.items()}
+                    return toret
+
+                # Load example of output measurements. If spectra_fn provided, use it; otherwise use input catalog options
+                spectra_fn = shotnoise_options.pop("spectra", None)
+                fn_shotnoise_options = shotnoise_options | {"auw": False, "cut": False}
+                if spectra_fn is None:
+                    spectra_fn = []
+                    spectrum_stat = stat.replace("shotnoise_", "").replace("_fm", "")
+                    for _region, _zrange in shotnoise_options["spectrum_regions_zranges"]:
+                        fn_shotnoise_options = options[spectrum_stat] | fn_shotnoise_options
+                        spectra_fn.append(get_stats_fn(kind=spectrum_stat, catalog=fn_catalog_options, **(options[spectrum_stat] | {"auw": False, "cut": False} | {"region": _region, "zrange": _zrange})))
+                spectra = [types.read(spectrum_fn) for spectrum_fn in spectra_fn]
+
+                # Now compute window function using forward model with derivatives
+                shotnoises = func(*[functools.partial(get_data, tracer) for tracer in tracers], spectra=spectra, **shotnoise_options)
+                # This is a dict of dict of shotnoises : {modeled_effect: {spectrum_region: shotnoise, ...}, ...}
+                for effect in shotnoises:  # geo, RIC or RIC+AMR
+                    for _region, _zrange in shotnoise_options["spectrum_regions_zranges"]:  # shotnoises[effect]:  # eg NGC, SGC and a zrange
+                        if shotnoise_options["ellsout"] is None:
+                            extra = effect
+                        else:
+                            listell = "".join(map(str, window_options["ellsout"]))
+                            extra = f"{effect}_{listell}"
+
+                        options = fn_shotnoise_options | {"extra": extra, "region": _region, "zrange": _zrange}
+                        write_stats(get_stats_fn(kind=stat, catalog=fn_catalog_options, **options), shotnoises[effect][(_region, _zrange)])
 
                 # synchronize here to avoid postprocess trying to load windows that haven't been written yet
                 jax.experimental.multihost_utils.sync_global_devices("window_fm_IO")  # wait for the writer
