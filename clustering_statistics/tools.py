@@ -798,7 +798,7 @@ def fill_fiducial_options(kwargs, analysis='full_shape'):
             fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
             options[stat] = fiducial_options | options.get(stat, {})
         for stat in ["shotnoise_mesh2_spectrum_fm"]:
-            spectrum_options = options[stat.replace("window_", "").replace("_fm", "")]
+            spectrum_options = options[stat.replace("shotnoise_", "").replace("_fm", "")]
             spectrum_options = {key: value for key, value in spectrum_options.items() if key in ["selection_weights", "optimal_weights", "basis"]}
             fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
             options[stat] = fiducial_options | spectrum_options | options.get(stat, {})

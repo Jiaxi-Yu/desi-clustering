@@ -806,7 +806,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 fn_shotnoise_options = shotnoise_options | {"auw": False, "cut": False}
                 if spectra_fn is None:
                     spectra_fn = []
-                    spectrum_stat = stat.replace("window_", "").replace("_fm", "")
+                    spectrum_stat = stat.replace("shotnoise_", "").replace("_fm", "")
                     for _region, _zrange in shotnoise_options["spectrum_regions_zranges"]:
                         fn_shotnoise_options = options[spectrum_stat] | fn_shotnoise_options
                         spectra_fn.append(get_stats_fn(kind=spectrum_stat, catalog=fn_catalog_options, **(options[spectrum_stat] | {"auw": False, "cut": False} | {"region": _region, "zrange": _zrange})))
@@ -815,7 +815,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 # Now compute window function using forward model with derivatives
                 shotnoises = func(*[functools.partial(get_data, tracer) for tracer in tracers], spectra=spectra, **shotnoise_options)
                 # This is a dict of dict of shotnoises : {modeled_effect: {spectrum_region: shotnoise, ...}, ...}
-                for effect in window:  # geo, RIC or RIC+AMR
+                for effect in shotnoises:  # geo, RIC or RIC+AMR
                     for _region, _zrange in shotnoise_options["spectrum_regions_zranges"]:  # shotnoises[effect]:  # eg NGC, SGC and a zrange
                         if shotnoise_options["ellsout"] is None:
                             extra = effect

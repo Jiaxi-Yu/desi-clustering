@@ -1772,9 +1772,9 @@ def compute_shotnoise_mesh2_spectrum_fm(
     """
     if seeds is not None:
         assert len(seeds) == n_realizations, "If seeds are provided, their number must match n_realizations."
-        seeds = [jnp.array([seed]) for seed in seeds]  # cast to scalar jax arrays
+        seeds = [jax.random.key(seed) for seed in seeds]  # cast to scalar jax arrays
     else:
-        seeds = [jnp.array([3 * i + 87]) for i in range(n_realizations)]
+        seeds = [jax.random.key(3 * i + 87) for i in range(n_realizations)]
 
     # Notes to self:
     # * RIC not optional
