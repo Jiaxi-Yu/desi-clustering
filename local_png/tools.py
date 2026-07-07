@@ -206,7 +206,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
     
             if len(zeffs[tracer]) > 1:
                 zeff = [zeffs[tracer][ell] for ell in [0, 2]]
-                _rescale_bias_params(likelihood, tracer=[f"{tt}{cross_suffix}_ell0", f"{tt}{cross_suffix}_ell2"], zeff=zeff)
+                _rescale_bias_params(tracer=[f"{tt}{cross_suffix}_ell0", f"{tt}{cross_suffix}_ell2"], zeff=zeff)
                 try:
                     # logger.warning('we neglect the redshift dependence of the damping term, for now')
                     # Note: the first damping term is fixed to 0 so only need to update the second one.
@@ -219,8 +219,6 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
 
 
 _PNG_CROSS_TWO_REDSHIFT_CLS = None
-
-
 def _get_png_cross_two_redshift_cls():
     """Lazily build (and cache) the two-redshift local-PNG cross calculator.
 
@@ -470,11 +468,12 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
         if two_z is not None:
             # cross with the two tracers at two different snapshot redshifts (z_x for tracers[0],
             # z_y for tracers[1]); single Lorentzian enforced below by fixing the first sigmas to 0.
-            templates = [FixedSpectrum2Template(fiducial=DESI(), engine=engine, z=zz) for zz in two_z]
+            templates = [FixedSpectrum2Template(fiducial=DESI(engine=engine), engine=engine, z=zz) for zz in two_z]
             theory = _get_png_cross_two_redshift_cls()(templates=templates, mode="b-p", tracers=tracers_theo)
         else:
-            template = FixedSpectrum2Template(fiducial=DESI(), engine=engine, z=_template_z(ell))
+            template = FixedSpectrum2Template(fiducial=DESI(engine=engine), engine=engine, z=_template_z(ell))
             theory = PNGTracerSpectrum2Poles(template=template, mode="b-p", tracers=tracers_theo)
+
         # Fix some parameters:
         params = get_params(theory)
         params['fnl_loc'].update(value=0.0, fixed=fix_fnl)
@@ -661,7 +660,7 @@ def build_total_likelihood(order, pks, observables, covs, zeffs, fiducial, scale
 
 def run_profiler(likelihood, fn_output=None):
     """ 
-    Run the iminuit profiler on the likelihood, the results are saved in a text file if output_name is provided. fn_output should be a .h5 file. 
+    Run the iminuit profiler on the likelihood, the results are saved in a .h5 file if fn_output is provided.
     """
     from desilike import Posterior, compile
     from desilike.profilers import Profiler, Minuit
@@ -671,11 +670,16 @@ def run_profiler(likelihood, fn_output=None):
     profiles = profiler.maximize(niterations=10)
     logger.info(f'\n{profiler.profiles.to_stats(tablefmt="pretty")}')
     best = profiler.profiles.choice(index='argmax', squeeze=True).select(input=True).best
+    
     # To set internal arrays
     compile(likelihood)(best)
 
     if fn_output is not None:
-        profiles.write(fn_output)
+        if not fn_output.endswith('.h5'):
+            logger.warning(f'Output filename {fn_output} does not end with .h5, skipping.')
+        else:
+            profiles.write(fn_output)
+            
     return profiler
 
 
@@ -697,10 +701,13 @@ def run_mcmc(likelihood, dir_output='tmp/', resume=False, nchains=1, max_steps=2
 
     posterior = compile(Posterior(likelihood=likelihood))
     mpicomm = get_mpicomm()
+    
     if not resume and mpicomm.rank == 0:  # just remove directory
          for path in Path(dir_output).glob('*'):
             if path.name != 'profiles.h5':
+                import shutil
                 shutil.rmtree(path) if path.is_dir() else path.unlink()
+
     sampler = Sampler(posterior, kernel=Emcee(), rng=31, output_dir=dir_output, nparallel=nchains)  
     sampler.run(max_steps=max_steps, check_every=check_every, save_every=check_every)
 
