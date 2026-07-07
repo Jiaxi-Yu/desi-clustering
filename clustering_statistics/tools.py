@@ -132,6 +132,8 @@ def get_simple_stats(stats):
     """Given input stats name, return simple stats name; e.g. 'mesh2_spectrum' would result in 'spectrum2'."""
     if stats == 'mesh2_spectrum':
         return 'spectrum2'
+    elif stats == 'recon_mesh2_spectrum':
+        return 'spectrum2recon'
     elif stats == 'mesh3_spectrum':
         return 'spectrum3'
     elif stats == 'particle2_correlation':
@@ -142,6 +144,8 @@ def get_simple_stats(stats):
         return 'correlation3'
     elif stats == 'recon_particle3_correlation':
         return 'correlation3recon'
+    elif stats == 'recon_bao':
+        return 'baorecon'
     else:
         raise NotImplementedError(f'stats {stats} is unknown')
 
@@ -494,7 +498,6 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
         propose_fiducial['particle2_correlation'].update(battrs={'s': np.linspace(0., 180., 181), 'mu': (np.linspace(-1., 1., 201), 'midpoint')})
         propose_fiducial['particle3_correlation'].update(battrs={'s': np.linspace(0., 160., 21), 'pole': (list(range(6)), 'firstpoint')}, selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
 
-
     if 'protected' in analysis:
         propose_fiducial['mesh2_spectrum'].update(ells=(0,), edges={'min': 0.02, 'step': 0.001})
         propose_fiducial['mesh3_spectrum'].update(ells=[(0, 0, 0)])
@@ -515,7 +518,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['recon_particle2_correlation'] = dict(propose_fiducial['recon_particle2_correlation'])  # break shared reference with particle2_correlation
     propose_fiducial['recon_particle2_correlation']['nran'] = {tracer: propose_recon_corr_nran[st] for tracer, st in zip(tracers, simple_tracers)}
 
-    for name in ['window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum']:
+    for name in ['window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum', 'covariance_particle2_correlation']:
         propose_fiducial[name] = {}
 
     if 'png' in analysis:
@@ -527,9 +530,13 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
         propose_meshsizes = {'BGS': 864, 'LRG': 864, 'LGE': 864, 'ELG': 1080, 'LRG+ELG': 864, 'QSO': 1152}
         # very stable with nran, cellsize and boxsize
         propose_fiducial['covariance_mesh2_spectrum']['mattrs'] = {'meshsize': propose_meshsizes[simple_tracers[0]], 'cellsize': 10.}
+    propose_fiducial['covariance_particle2_correlation'] = propose_fiducial['covariance_mesh2_spectrum']
+    for name in ['covariance_mesh2_spectrum', 'covariance_particle2_correlation']:
+        propose_fiducial[name.replace('covariance_', 'covariance_recon_')] = propose_fiducial[name]
 
     propose_fiducial['window_mesh3_spectrum']['buffer_size'] = {'BGS': 3, 'LRG': 3, 'LGE': 3, 'ELG': 0, 'LRG+ELG': 3, 'QSO': 0}[simple_tracers[0]]
     propose_fiducial['rotation_mesh2_spectrum'] = {'select': {'k': slice(0, None, 5)}}
+    propose_fiducial['systematic_templates'] = {}
     propose_fiducial['combine_window_mesh2_spectrum'] = {'effect': 'RIC+AMR', 'method': 'spline'}
 
     if "window_mesh2_spectrum_fm" in kind:
@@ -772,6 +779,12 @@ def fill_fiducial_options(kwargs, analysis='full_shape'):
             fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
             # spectrum_options | fiducial_options because we override mattrs if given
             options[stat] = spectrum_options | fiducial_options | options.get(stat, {})
+        for stat in ['covariance_particle2_correlation']:
+            fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
+            options[stat] = spectrum_options | fiducial_options | options.get(stat, {})
+        for stat in ['covariance_recon_mesh2_spectrum', 'covariance_recon_particle2_correlation']:
+            fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
+            options[stat] = fiducial_options | options[stat.replace('recon_', '')] | options.get(stat, {})
         for stat in ['combine_window_mesh2_spectrum', 'rotation_mesh2_spectrum']:
             fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
             options[stat] = fiducial_options | options.get(stat, {})
@@ -864,47 +877,11 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 cat_dir = cat_dir / 'v1.5'
             ext = 'fits'
 
-        elif version == 'data-dr2-v1.1':
-            cat_dir = desi_dir / f'survey/catalogs/DA2/LSS/loa-v1/LSScats/v1.1'
-            ext = 'fits'
-            if kind == 'parent_randoms':
-                program = 'bright' if 'BGS' in tracer else 'dark'
-                return [cat_dir / f'{program}_{iran}_full_noveto.ran.{ext}' for iran in nrans]
-            if 'bitwise' in weight:
-                data_dir = cat_dir / 'PIP'
-            else:
-                data_dir = cat_dir / 'nonKP'
-            ext = 'fits'
-            if kind == 'data':
-                return data_dir / f'{tracer}_{region}_clustering.dat.{ext}'
-            if kind == 'randoms':
-                return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.{ext}' for iran in nrans]
-            if kind == 'full_data':
-                return cat_dir / f'{tracer}_full_HPmapcut.dat.{ext}'
-            if kind == 'full_randoms':
-                return [cat_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.{ext}' for iran in nrans]
-
-        elif version == 'data-dr2-v2':
-            cat_dir = desi_dir / f'survey/catalogs/DA2/LSS/loa-v1/LSScats/v2'
-            if kind == 'parent_randoms':
-                program = 'bright' if 'BGS' in tracer else 'dark'
-                return [_find_extension(cat_dir / f'{program}_{iran}_full_noveto.ran', None) for iran in nrans]
-            if 'bitwise' in weight:
-                data_dir = cat_dir / 'PIP'
-            else:
-                data_dir = cat_dir / 'nonKP'
-            ext = 'fits'
-            if kind == 'data':
-                return data_dir / f'{tracer}_{region}_clustering.dat.{ext}'
-            if kind == 'randoms':
-                return [data_dir / f'{tracer}_{region}_{iran:d}_clustering.ran.{ext}' for iran in nrans]
-            if kind == 'full_data':
-                return cat_dir / f'{tracer}_full_HPmapcut.dat.{ext}'
-            if kind == 'full_randoms':
-                return [cat_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.{ext}' for iran in nrans]
-
-        elif version == 'data-dr2-v2.1':
-            cat_dir = desi_dir / f'survey/catalogs/DA2/LSS/loa-v1/LSScats/v2.1'
+        elif version in ['data-dr2-v1.1', 'data-dr2-v2', 'data-dr2-v2.1', 'data-dr2-test']:
+            version = version.split('-')[-1]
+            if version == 'v1.1':
+                ext = 'fits'
+            cat_dir = desi_dir / f'survey/catalogs/DA2/LSS/loa-v1/LSScats' / version
             if kind == 'parent_randoms':
                 program = 'bright' if 'BGS' in tracer else 'dark'
                 return [_find_extension(cat_dir / f'{program}_{iran}_full_noveto.ran', None) for iran in nrans]
@@ -944,7 +921,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'full_data':
                 return cat_dir / f'{tracer}_full_HPmapcut.dat.{ext}'
             if kind == 'full_randoms':
-                return [cat_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.{ext}' for iran in nrans]  
+                return [cat_dir / f'{tracer}_{iran:d}_full_HPmapcut.ran.{ext}' for iran in nrans]
 
         elif version == 'holi-v1-complete':
             cat_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_v1/altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
@@ -1037,6 +1014,32 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             cat_dir = base_dir / f'altmtl{imock:d}/kibo-v1/mock{imock:d}/LSScats'
 
+        elif version == 'abacus-hf-dr2-v1':
+            # TODO: This is not correctly implemented yet. This will only work as expected if zsnap coincides with the zrange passed to compute_stats.py.
+            # Reason: compute_stats.py first loads all the catalogs and then perform redshifts cuts as the measurement for that redshift bin is to be computed.
+            # zsnap = {(0.1, 0.4): 0.2, (0.4, 0.6): 0.5, (0.6, 0.8): 0.725, (0.8, 1.1): 0.950, (1.1, 1.6): 0.950, (0.8, 2.1): 1.4}[zrange]
+            stracer = get_simple_tracer(tracer)
+            zsnap = {'ELG': 0.950, 'QSO': 1.4}[stracer]
+            sznap = f'{zsnap:.3f}'.replace('.', 'p')
+            if tracer == 'QSO':
+                szrange = '0p8to3p5'
+            if tracer == 'ELG':
+                szrange = '0p8to1p6'
+                stracer = 'ELG_v5'
+            if tracer == 'LRG':
+                szrange = '0p4to1p1'
+            if tracer == 'BGS':
+                szrange = '0p1to0p4'
+            base_dir = desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/AbacusSummit_base_c000_ph{imock:03d}/CutSky/{stracer}/z{zsnap:.3f}/forclustering'
+            if kind == 'data':
+                return base_dir / f'cutsky_abacusHF_DR2_{tracer}_z{sznap}_zcut_{szrange}_clustering.dat.fits'
+            if kind == 'randoms':
+                # TODO: nran is ignored hear.
+                # Reason: there are only randoms for nran=8-17
+                # return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/raw/rands_intiles_DARK_{iran:d}_NO_imagingmask_withz.fits' for iran in range(8,18)]
+                # return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/imaging_mask_applied/rands_intiles_DARK_{iran:d}_withz.fits' for iran in range(8,18)]
+                return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/imaging_mask_applied/rands_intiles_DARK_{iran:d}_withz.fits' for iran in range(8,18)]
+
         elif version == 'abacus-hf-dr2-v2-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/AbacusHF_DR2v2'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
@@ -1050,7 +1053,8 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 if 'BGS' in tracer:
                     cat_dir = Path("/global/cfs/cdirs/desi/mocks/cai/Uchuu-SHAM/Y3-v2.0/0000/altmtl/BGS_BRIGHT/MAG-21.35_KP3/")
                 else:
-                    cat_dir = Path("/global/cfs/cdirs/desi/mocks/cai/LSS/DA2/mocks/Uchuu-SHAM/altmtl0/loa-v1/mock0/LSScats/")
+                    # cat_dir = Path("/global/cfs/cdirs/desi/mocks/cai/LSS/DA2/mocks/Uchuu-SHAM/altmtl0/loa-v1/mock0/LSScats/")
+                    cat_dir = Path("/global/cfs/cdirs/desi/mocks/cai/Uchuu-SHAM/Y3-v2.0/0000/altmtl/DARK/altmtl0/loa-v1/mock0/LSScats/")
             elif 'complete' in version:
                 #base_dir =  Path(desi_dir / f'mocks/cai/Uchuu-SHAM/Y3-v2.0/{imock:04d}/altmtl/')
                 cat_dir = Path("/global/cfs/cdirs/desi/mocks/cai/LSS/DA2/mocks/Uchuu-SHAM/altmtl0/loa-v1/mock0/LSScats/")
@@ -1062,7 +1066,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                     if '-' in tracer:
                         mag = tracer.split('-')[-1]
                         mag_cut = f'_Mr_{mag}'
-                    else: 
+                    else:
                         mag_cut = ''
                     if kind == 'data':
                         return Path(cat_dir / f'Uchuu-SHAM_{get_simple_tracer(tracer)}_Y3-v2.0{mag_cut}_0000_clustering.dat.{ext}')
@@ -1179,7 +1183,7 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
     version = join_if_not_none(str, 'version')
     if version: stats_dir = stats_dir / version
     imock = join_if_not_none(str, 'imock')
-    if (project != '') and imock: stats_dir = stats_dir / f'mock{imock}'
+    if project and imock: stats_dir = stats_dir / f'mock{imock}'
     imock = f'_{imock}' if imock and (project == '') else ''
     tracer = join_tracers(check_is_not_none('tracer'))
     zrange = join_if_not_none(lambda zrange: f'z{float2str(zrange[0], 1, 3)}-{float2str(zrange[1], 1, 3)}', 'zrange')
@@ -1194,7 +1198,10 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
     corr_type = ''.join(list(battrs)) if battrs is not None else None
     jackknife = kwargs.get('jackknife', {}).get('nsplits', None)
     if 'particle2_correlation' in kind:
-        if corr_type is None: corr_type = 'smu'
+        if corr_type is None:
+            corr_type = 'smu'
+            if 'covariance' in kind:
+                corr_type = 'poles'
         if jackknife:
             corr_type = f'{corr_type}_jackknife{jackknife:d}'
         full = f'particle2_correlation_{corr_type}'
@@ -1215,6 +1222,13 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
         full = f'mesh3_spectrum{basis}_poles'
         if full not in kind:
             kind = kind.replace('mesh3_spectrum', full)
+    if 'window' in kind:
+        templates = kwargs.get('templates', None)
+        if templates is not None and templates:
+            if isinstance(templates, str):
+                templates = [templates]
+            templates = '-'.join(['syst'] + list(templates))
+            extra = f'{extra}-{templates}' if extra else f'_{templates}'
     basename = f'{kind}_{tracer}{zrange}_{region}_weight-{weight}{auw}{cut}{extra}{imock}.{ext}'
     return stats_dir / basename
 
@@ -1469,7 +1483,7 @@ def expand_randoms(randoms, parent_randoms, data, from_randoms=('RA', 'DEC'), fr
             data = data.copy()  # shallow copy
         data['TARGETID_DATA'] = data.pop('TARGETID')
         if data['TARGETID_DATA'].max() < int(1e9):  # faster method
-            lookup = np.arange(1 + data['TARGETID_DATA'].max())
+            lookup = np.full(1 + data['TARGETID_DATA'].max(), -1, dtype=np.int64)
             lookup[data['TARGETID_DATA']] = np.arange(len(data))
             index = lookup[randoms['TARGETID_DATA']]
         else:
@@ -1625,15 +1639,15 @@ def read_catalog(kind=None, concatenate=True, get_catalog_fn=get_catalog_fn,
                     expand['from_data'] = [] # no need of FRAC_TLOBS_TILES for on-the-fly complete mocks
 
     if kind == 'randoms' and isinstance(expand, dict):
-        # if reshuffling is performed need to extract FRAC_TLOBS_TILES from data to have the correct completeness weight !
+        # if reshuffling is performed need to extract FRAC_TLOBS_TILES from data to have the correct completeness weight!
         from_data = expand.get('from_data', ['FRAC_TLOBS_TILES'] if isinstance(reshuffle, dict) else ['Z', 'WEIGHT_SYS'])
         from_randoms = expand.get('from_randoms', ['RA', 'DEC', 'NTILE'])
         parent_randoms_fn = expand['parent_randoms_fn']
         if not isinstance(parent_randoms_fn, (tuple, list)):
             parent_randoms_fn = [parent_randoms_fn]
-            
+
         if mpicomm.rank == 0: logger.info(f'Expanding randoms with {from_data=} and {from_randoms=}')
-        
+
         # WARNING: order matters!
         parent_randoms = []
         for ifn, fn in enumerate(parent_randoms_fn):
@@ -1856,14 +1870,14 @@ def set_catalog_weights(catalog, kind, weight=None, FKP_P0=None, binned_weight=N
                 if 'iip' in weight_type:
                     individual_weight *= _compute_iip_weight(bitwise_weights)
                     bitwise_weights = None
-            else:
+            else:  # parent
                 # equivalent of IIP weights
-                #individual_weight /= (catalog['FRACZ_TILELOCID'] * catalog['FRAC_TLOBS_TILES'])
                 individual_weight /= catalog['FRACZ_TILELOCID']
+                if 'compondata' in weight_type:
+                    individual_weight /= catalog['FRAC_TLOBS_TILES']
                 bitwise_weights = None
-        if 'data' in kind and 'parent' in kind and 'bitwise' not in weight_type:
+        if 'data' in kind and 'parent' in kind and 'bitwise' not in weight_type and 'compondata' not in weight_type:
             individual_weight *= catalog['FRAC_TLOBS_TILES']
-        catalog = catalog[['RA', 'DEC']]
         catalog['INDWEIGHT'] = individual_weight
         if bitwise_weights is not None: catalog['BITWEIGHT'] = bitwise_weights
 
@@ -1893,6 +1907,12 @@ def set_catalog_weights(catalog, kind, weight=None, FKP_P0=None, binned_weight=N
             elif kind == 'randoms':
                 individual_weight = catalog['WEIGHT'] * get_binned_weight(catalog, binned_weight['missing_power'])
 
+        elif 'compondata' in weight_type:
+            if kind == 'data':
+                individual_weight /= catalog['FRAC_TLOBS_TILES']
+            elif kind == 'randoms':
+                individual_weight *= catalog['FRAC_TLOBS_TILES']
+
         if 'FKP' in weight_type.upper():
             if log and mpicomm.rank == 0:
                 if FKP_P0 is None:
@@ -1914,8 +1934,8 @@ def set_catalog_weights(catalog, kind, weight=None, FKP_P0=None, binned_weight=N
                 logger.info('Dividing individual weights by WEIGHT_SYS')
             individual_weight /= catalog['WEIGHT_SYS']
 
-        if 'comp' in weight_type:
-            individual_weight *= get_binned_weight(catalog, binned_weight['completeness'])
+        #if 'comp' in weight_type:
+        #    individual_weight *= get_binned_weight(catalog, binned_weight['completeness'])
 
         if 'wsys' in weight_type and not 'noimsys' in weight_type:
             new_wsys = weight_type.split('wsys-')[-1]
@@ -2411,6 +2431,37 @@ def merge_randoms_catalogs(output_fn: str | Path, input_fns: list[str | Path], p
     write_stats(output_fn, merged)
 
 
+def get_renormalization_regions(tracer):
+    """Regions where to renormalize data / randoms."""
+    tracer = get_simple_tracer(tracer)
+    regions = ['N', 'S']
+    if tracer.startswith('QSO'):
+        regions = ['N', 'SnoDES', 'DES']
+    return regions
+
+
+def check_if_requires_renormalization(weight='', **kwargs):
+    return 'compondata' in weight
+
+
+def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
+    """Renormalize randoms / data in each region."""
+    sum_data_weights, sum_randoms_weights = [], []
+    if regions is None:
+        regions = get_renormalization_regions(tracer)
+    for region in regions:
+        mask_data = select_region(data['RA'], data['DEC'], region=region)
+        mask_randoms = select_region(randoms['RA'], randoms['DEC'], region=region)
+        sum_data_weights.append(data['INDWEIGHT'][mask_data].csum())
+        sum_randoms_weights.append(randoms['INDWEIGHT'][mask_randoms].csum())
+
+    sum_data_weights, sum_randoms_weights = np.array(sum_data_weights), np.array(sum_randoms_weights)
+    alphas = sum_data_weights / sum_randoms_weights / (sum(sum_data_weights) / sum(sum_randoms_weights))
+    for region, alpha in zip(regions, alphas):
+        mask_randoms = select_region(randoms['RA'], randoms['DEC'], region=region)
+        randoms['INDWEIGHT'] *= alpha
+
+
 def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42):
     """
     Reshuffled random redshifts from (merged) data.
@@ -2481,9 +2532,7 @@ def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42):
 
     tracer = get_simple_tracer(tracer)
     P0 = {'BGS': 7e3, 'LRG': 1e4, 'LGE': 1e4, 'ELG': 4e3, 'QSO': 6e3}[tracer]
-    regions = ['N', 'S']
-    if tracer.startswith('QSO'):
-        regions = ['N', 'SnoDES', 'DES']
+    regions = get_renormalization_regions(tracer)
 
     sum_data_weights, sum_randoms_weights = [], []
     column = 'FRAC_TLOBS_TILES'
@@ -2645,7 +2694,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
                 mask &= data['Z'] < 1.5
             zfrac = 0.966
             zrange = (0.4, 1.1)
-            
+
         if tracer.startswith('BGS'):
             if True: #'ANY' in tracer:
                 fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
@@ -2908,124 +2957,98 @@ def add_photometric_template_values(
     return catalog
 
 
-def interpolate_window_realizations(window_geometry: types.WindowMatrix, window_realizations: list[types.WindowMatrix],
-                                    method: str='spline', **kwargs) -> types.WindowMatrix:
-
-    """
-    Interpolate window function realizations onto a common theory grid using spline or Gaussian process regression.
-
-    This function takes multiple window matrix realizations (e.g., from different
-    forward-model batches) and combines them into a single smooth window matrix by interpolating
-    onto the theory grid of a reference window. This is useful for obtaining a robust
-    window estimate when individual realizations are noisy or computed at different k-points.
+def rebinning_matrix(current_theory: types.ObservableTree, new_coords: types.ObservableTree=None, interp_order: int=3, diag: str=None):
+    """Build a window matrix that rebins ``current_theory`` onto a new coordinate grid.
 
     Parameters
     ----------
-    window_geometry : types.WindowMatrix
-        Reference window matrix defining the output theory and observable grids. Typically computed
-        from the survey geometry (mask, selection, etc.) without systematics. The theory and
-        observable axes are used as the interpolation targets.
-    window_realizations : list[types.WindowMatrix] or types.WindowMatrix
-        List of window matrix realizations to interpolate and combine. Each realization should have
-        the same observable structure as ``window_geometry``.
-        Indicate theory bins for why the window has *not* been computed with 0 (else 1) in
-        ``[pole.get('nmodes') for pole in window.theory]``.
-        If a single WindowMatrix is provided, it is converted to a list of length 1.
-    method : str, optional
-        Interpolation method. Options are:
-        - 'spline': 2D spline (default). Uses :class:`scipy.interpolate.SmoothBivariateSpline`
-          with default kx=ky=3 (cubic). Supports additional kwargs 'kx', 'ky'
-          and other spline parameters (s, eps, etc.).
-        - 'gaussian_process': Gaussian process regression. Uses scikit-learn's
-          :class:`GaussianProcessRegressor` with a Matern kernel. Supports additional kwargs
-          for kernel configuration (length_scale, nu, etc.).
-    **kwargs : dict, optional
-        Additional keyword arguments passed to the interpolation method.
+    current_theory : types.ObservableTree
+        Observable tree whose coordinate grid defines the *theory*
+        side of the window matrix.  Every leaf must have exactly one coordinate
+        dimension, and that coordinate must be a tensor product of 1-D grids
+        (i.e. ``coords`` is the meshgrid of separable 1-D axes).
+    new_coords : int or array-like or None, optional
+        Target coordinate grid for the *theory* side of the window matrix.
+
+        - ``None`` (default): keep the same grid as ``current_theory``.
+        - ``types.ObservableTree``: new *theory* for the window matrix
+        - array-like: explicit per-axis 1-D arrays (same length as the number
+          of coordinate dimensions).
+    interp_order : int, optional
+        Polynomial order of the spline used by ``matrix_spline_interp``
+        (default 3, i.e. cubic).
+    diag : {None, 'separate'}, optional
+        Controls how the diagonal (same-point) contribution is handled.
+
+        - ``None`` (default): the interpolation matrix is used as-is.
+        - ``'separate'``: the diagonal rows of the interpolation matrix are
+          zeroed out and appended as a separate identity block at the end of
+          the matrix columns.  The observable coordinates on the theory side
+          are then extended to include the original current-theory points as
+          extra rows, so the diagonal contribution can be passed through
+          unmodified.
 
     Returns
     -------
-    window_interpolated : types.WindowMatrix
-        Interpolated window matrix with the same structure as ``window_geometry`` (same observable
-        and theory axes).
-
-    Examples
-    --------
-    Combine multiple forward-model window realizations into a single smooth window::
-
-        import lsstypes as types
-        # Load reference geometry window (from randoms)
-        window_geo = types.read('window_geometry.h5')
-        # Load forward-model windows (e.g., from 10 mock surveys)
-        windows_fm = [types.read(f'window_fm_batch{i}.h5') for i in range(10)]
-        # Interpolate onto geometry grid using cubic splines
-        window_smooth = tools.interpolate_window_realizations(
-            window_geo, windows_fm, method='spline', kx=3, ky=3
-        )
-        window_smooth.write('window_combined.h5')
-
-    Use Gaussian process for smoother results on sparse grids::
-
-        window_smooth = interpolate_window_realizations(
-            window_geo, windows_fm, method='gaussian_process',
-            length_scale=0.1, nu=1.5
-        )
-
+    types.WindowMatrix
+        Window matrix with ``value`` the block-diagonal interpolation matrix,
+        ``theory`` the rebinned observable tree (new coordinate grid), and
+        ``observable`` set to ``current_theory``.
     """
-    if isinstance(window_realizations, types.WindowMatrix):
-        window_realizations = [window_realizations]
+    import numbers
+    import scipy as sp
+    from lsstypes import ObservableLike
+    from lsstypes.utils import matrix_spline_interp
 
-    values, weights = [], []
-    for window_realization in window_realizations:
-        values.append(window_realization.value())
-        weights.append(np.ones(window_geometry.observable.size)[:, None] * np.concatenate([pole.values('nmodes') for pole in window_realization.theory.flatten()]))
+    assert diag in [None, 'separate']
+    coord_name = list(next(iter(current_theory)).coords())
+    assert len(coord_name) == 1
+    coord_name = coord_name[0]
 
-    mean = sum(value * weight for value, weight in zip(values, weights))
-    sweights = sum(weights)
-    mean = mean / np.where(sweights, sweights, 1.)
-    mean = np.where(sweights != 0, mean, 0.)
-    sweights2 = sum(weight**2 for weight in weights)
-    scale = sweights / np.where(sweights != 0, (sweights**2 - sweights2), 1.)
-    var = scale * sum(weight * (value - mean)**2 for value, weight in zip(values, weights))
-    ivar = 1. / np.where(sweights != 0, var, np.inf)
-    window_mean = window_geometry.clone(value=mean)
-    window_ivar = window_geometry.clone(value=ivar)
+    def per_axis_coords(theory):
+        coords = np.concatenate([pole.coords(coord_name) for pole in theory.flatten(level=None)], axis=0)
+        return [np.unique(coord) for coord in coords.T]
 
-    # Iterate on output and input multipoles
+    current_coords = per_axis_coords(current_theory)
+    if new_coords is None:
+        new_coords = current_coords
+    elif isinstance(new_coords, ObservableLike):
+        new_coords = per_axis_coords(new_coords)
+
+    def flatten_coords(*coords):
+        coords_flat = np.meshgrid(*coords, indexing='ij')
+        return np.column_stack([coord.ravel() for coord in coords_flat])
+
+    new_coords_flat = flatten_coords(*new_coords)
+
     value = []
-    for olabel, opole in window_mean.observable.items(level=None):
-        row = []
-        for tlabel, tpole in window_mean.theory.items(level=None):
-            block_mean = window_mean.at.theory.get(**tlabel).at.observable.get(**olabel)
-            xt = block_mean.theory.coords(0)  # theory k
-            xo = block_mean.observable.coords(0)  # observable k
-            xt, xo = np.meshgrid(xt, xo, indexing='ij')
-            points = [(xt - xo).ravel(), xo.ravel()]  # interpolation in (xt - xo), xo space
-            points = np.column_stack(points)
-            mean = block_mean.value()
-            ivar = window_ivar.at.theory.get(**tlabel).at.observable.get(**olabel).value()
-            mask = np.ravel(ivar > 0)
-            if method == 'spline':
-                from scipy.interpolate import SmoothBivariateSpline
-                spline = SmoothBivariateSpline(*points[mask].T, mean.ravel()[mask], w=ivar.ravel()[mask], **kwargs)
-                block = spline(*points.T, grid=False)
-            elif method == 'gaussian_process':
-                from sklearn.gaussian_process import GaussianProcessRegressor
-                from sklearn.gaussian_process.kernels import ConstantKernel, Matern
-                # X: shape (M, 2)
-                # y: observed means at each point
-                # se: standard error of each mean
-                kernel = ConstantKernel(1.0) * Matern(**kwargs)
-                gpr = GaussianProcessRegressor(
-                    kernel=kernel,
-                    alpha=1. / ivar.ravel()[mask],
-                    normalize_y=True,
-                    n_restarts_optimizer=5
-                )
-                gpr.fit(points[mask], mean.ravel()[mask])
-                # predict at new points Xnew: shape (K, 2)
-                block, y_std = gpr.predict(points, return_std=True)
-            block = block.reshape(xt.shape)
-            row.append(block)
-        value.append(row)
-    window_mean = window_mean.clone(value=np.block(value))
-    return window_mean
+    for label, pole in current_theory.items(level=None):
+        _current_coords = next(iter(pole.coords().values()))
+        current_coords = [np.unique(current_coord) for current_coord in _current_coords.T]
+        assert np.allclose(flatten_coords(*current_coords), _current_coords)
+        matrices1d = [matrix_spline_interp(new_coord, current_coord, interp_order=interp_order) for new_coord, current_coord in zip(new_coords, current_coords)]
+        matrixnd = matrices1d[0]
+        for matrix1d in matrices1d[1:]:
+            matrixnd = np.kron(matrixnd, matrix1d)
+        if diag == 'separate':
+            shape = tuple(len(coord) for coord in current_coords)
+            assert all(ss == shape[0] for ss in shape[1:])
+            multi_index = tuple(np.arange(s) for s in shape)
+            diag_index = np.ravel_multi_index(multi_index, dims=shape)
+            # zero-out diagonal contribution
+            matrixnd[diag_index, :] = 0.
+            # then add the diagonal contribution
+            matrixdiag = np.zeros(matrixnd.shape[:1] + (len(diag_index),))
+            matrixdiag[diag_index, np.arange(len(diag_index))] = 1.
+            matrixnd = np.concatenate([matrixnd, matrixdiag], axis=-1)
+        value.append(matrixnd)
+
+    def f(pole):
+        coord_values = new_coords_flat
+        if diag == 'separate':
+            coord_values = np.concatenate([new_coords_flat, np.column_stack(current_coords)], axis=0)
+        return types.ObservableLeaf(value=np.zeros(len(coord_values)), **{coord_name: coord_values}, coords=[coord_name])
+
+    new_theory = current_theory.map(lambda pole: f(pole), level=None)
+    value = sp.linalg.block_diag(*value)
+    return types.WindowMatrix(value=value, theory=new_theory, observable=current_theory)

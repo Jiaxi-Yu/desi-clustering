@@ -31,6 +31,8 @@ output, error = 'slurm_outputs/holi_mocks_recon/slurm-%j.out', 'slurm_outputs/ho
 kwargs = {}
 environ = Environment('nersc-cosmodesi')
 tm = TaskManager(queue=queue, environ=environ)
+tm_gpu = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='02:00:00',
+                            mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu'))
 tm80 = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='03:00:00',
                             mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g'))
 
@@ -105,19 +107,15 @@ if __name__ == '__main__':
     stats_dir = tools.base_stats_dir
     analysis = 'bao'
     project = f'{analysis}/base'
-    version = 'holi-v3-altmtl'
     onthefly = None
-    if version == 'holi-v3-altmtl':
-        # do not perform measurements on dubious mocks
-        bad_imocks = np.loadtxt('../helper_scripts/dubious_holi-v3-altmtl.txt', dtype=int)
-        imocks2run = imocks2run[~np.isin(imocks2run, bad_imocks)]
-    # Per-tracer batch sizes (mocks per slurm task), sized to fit each task in the 3 h wall.
-    # Measured per-mock cost (NGC+SGC, all zranges): LRG ~27 min, ELG ~28 min, QSO ~6 min.
-    max_mocks_per_batch_qso    = 25  # 25 * 6  ~= 150 min, in 3 h wall (30 min margin)
-    max_mocks_per_batch_others = 5   # 5  * 28 ~= 140 min, in 3 h wall (40 min margin)
+    max_mocks_per_batch = 5
 
-    for tracer in ['LRG', 'ELG_LOPnotqso', 'QSO']:
-        max_mocks_per_batch = max_mocks_per_batch_qso if tracer == 'QSO' else max_mocks_per_batch_others
+    for tracer in ['BGS_BRIGHT-21.35', 'ELG_LOPnotqso']:
+        version = 'holi-bgs-altmtl' if tracer == 'BGS_BRIGHT-21.35' else 'holi-v3-altmtl'
+        imocks2run = np.arange(1001)
+        if version == 'holi-v3-altmtl':
+            bad_imocks = np.loadtxt('../helper_scripts/dubious_holi-v3-altmtl.txt', dtype=int)
+            imocks2run = imocks2run[~np.isin(imocks2run, bad_imocks)]
         if True:
             exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer, region='NGC', version=version), test_if_readable=False, imock=imocks2run)[:2]
             imocks = exists[1]['imock']
@@ -130,6 +128,8 @@ if __name__ == '__main__':
 
         def get_run_stats():
             _tm = tm80
+            if tracer in ['BGS_BRIGHT-21.35']:
+                _tm = tm_gpu
             return run_stats if mode == 'interactive' else _tm.python_app(run_stats)
 
         run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, stats=stats, analysis=analysis, onthefly=onthefly, postprocess=postprocess)

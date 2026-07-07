@@ -20,7 +20,7 @@ def _convert_covariance(covariance, with_attrs=False):
     def _get_fiducial(parameter, zeff=None):
         toret = {}
         if zeff is not None:
-            DM_over_rd_fid = fiducial.comoving_angular_distance(zeff) / fiducial.rs_drag
+            DM_over_rd_fid = fiducial.comoving_transverse_distance(zeff) / fiducial.rs_drag
             DH_over_rd_fid = (constants.c / 1e3) / (100. * fiducial.efunc(zeff)) / fiducial.rs_drag
             DV_over_rd_fid = DM_over_rd_fid**(2. / 3.) * DH_over_rd_fid**(1. / 3.) * zeff**(1. / 3.)
             FAP_fid = DM_over_rd_fid / DH_over_rd_fid
@@ -108,11 +108,11 @@ if __name__ == '__main__':
     for tracer, zrange in list_zrange:
         for region in ['GCcomb', 'NGC', 'SGC']:
             dp_covariance_fn = f'covariance_correlation_{tracer}_{region}_z{zrange[0]:.1f}-{zrange[1]:.1f}_default_FKP_lin.npy'
-            stats_dir = '/global/cfs/cdirs/desi/mocks/cai/LSS/DA2/mocks/desipipe'
+            stats_dir = '/global/cfs/cdirs/desi/science/cai/desi-clustering/dr2/summary_statistics/bao/rascalc/'
             kw = dict(stats_dir=stats_dir, weight='default-FKP', version='data-dr2-v1.1', tracer=tracer, region=region, zrange=zrange)
-            covariance_fn = tools.get_stats_fn(kind='covariance_particle2_correlation_rascalc', **kw)
+            covariance_fn = tools.get_stats_fn(kind='covariance_particle2_correlation', **kw)
             convert_covariance(dp_dir / dp_covariance_fn, covariance_fn, tracer=tracer)
             
             dp_covariance_fn = f'covariance_correlation-recon_{tracer}_{region}_z{zrange[0]:.1f}-{zrange[1]:.1f}_default_FKP_lin.npy'
-            covariance_fn = tools.get_stats_fn(kind='covariance_recon_particle2_correlation_rascalc', **kw)
+            covariance_fn = tools.get_stats_fn(kind='covariance_recon_particle2_correlation', **kw)
             convert_covariance(dp_dir / dp_covariance_fn, covariance_fn, tracer=tracer)

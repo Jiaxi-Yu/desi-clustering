@@ -17,7 +17,7 @@ def get_zrange_from_snap(tracer, zsnap=None, version='abacus-2ndgen'):
     Return redshift range from snapshot for given tracer and version.
     If zsnap is None, return dict of zsnap: zrange for all snapshots of the tracer and version.
     """
-    tracer = get_simple_tracer(tracer)
+    tracer = tracer if 'lorentzian' in tracer else get_simple_tracer(tracer)
     zrange = {}
     if version in ['abacus-2ndgen', 'ezmock']:
         if tracer == 'BGS':
@@ -58,6 +58,12 @@ def get_zrange_from_snap(tracer, zsnap=None, version='abacus-2ndgen'):
             zrange[1.475] = (1.1, 1.6)
         elif tracer == 'QSO':
             zrange[1.550] = (0.8, 2.1)
+        elif tracer == 'QSO_lorentzian':
+            zrange[0.950] = (0.8, 1.1)
+            zrange[1.250] = (1.1, 1.4)
+            zrange[1.475] = (0.8, 2.1)
+            zrange[1.550] = (1.4, 1.7)
+            zrange[1.850] = (1.7, 2.1)
         else:
             raise ValueError('unknown tracer {}'.format(tracer))
     if version == 'uchuu-hf':
@@ -111,11 +117,12 @@ def propose_box_fiducial(kind, tracer, version='abacus-hf-v2'):
         'LRG+ELG': {'recon': {'bias': 1.6, 'smoothing_radius': 15.}},
         'LRG': {'recon': {'bias': 2.0, 'smoothing_radius': 15.}},
         'ELG': {'recon': {'bias': 1.2, 'smoothing_radius': 15.}},
-        'QSO': {'recon': {'bias': 2.1, 'smoothing_radius': 30.}}
+        'QSO': {'recon': {'bias': 2.1, 'smoothing_radius': 30.}},
+        'QSO_lorentzian': {'recon': {'bias': 2.1, 'smoothing_radius': 30.}}
     }
     tracers = _make_tuple(tracer)
     tracer = join_tracers(tracers)
-    tracer = get_simple_tracer(tracer)
+    tracer = tracer if 'lorentzian' in tracer else get_simple_tracer(tracer)
     propose_fiducial = base | propose_fiducial[tracer]
     propose_fiducial['recon']['nran'] = 10
     propose_fiducial['catalog'] = {'hod': '', 'los': 'z'}
@@ -133,7 +140,9 @@ def propose_box_fiducial(kind, tracer, version='abacus-hf-v2'):
         propose_meshsizes = {'meshsize': meshsize}
     if 'abacus-hf' in version:
         hod = 'base'
-        if 'BGS' in tracer or 'LRG' in tracer:
+        if 'lorentzian' in tracer:
+            hod = 'base_lorentzian_dv_cat_fixed'
+        elif 'BGS' in tracer or 'LRG' in tracer:
             hod = 'base_B'
         elif 'ELG' in tracer:
             hod = 'base_conf_nfwexp'
@@ -232,21 +241,28 @@ def get_box_catalog_fn(version: str='abacus-hf-v2', cat_dir: str=None, kind='dat
         cat_dir = desi_dir / f'cosmosim/SecondGenMocks/CubicBox/{stracer}/z{zsnap:.3f}/AbacusSummit_base_c000_ph{imock:03d}/'
         return cat_dir / f'{stracer}_real_space.fits'
     if version == 'abacus-hf-v1':
-        cat_dir = desi_dir / f'mocks/cai/abacus_HF/{"DR2_v2.0" if version == "v2" else "DR2_v1.0"}/AbacusSummit_base_c{cosmo}_ph{imock:03d}/Boxes'
         stracer = get_simple_tracer(tracer)
-        sznap = f'{zsnap:.3f}'.replace('.', 'p')
-        return cat_dir / f'abacus_HF_{stracer}_{sznap}_DR2_v1.0_AbacusSummit_base_c000_ph{imock:03d}_clustering.dat.fits'
+     # cat_dir = desi_dir / f'mocks/cai/abacus_HF/{"DR2_v2.0" if version == "v2" else "DR2_v1.0"}/AbacusSummit_base_c{cosmo}_ph{imock:03d}/Boxes/{stracer}'
+        cat_dir = desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/AbacusSummit_base_c{cosmo}_ph{imock:03d}/Boxes/{stracer}'
+        zsnap = f'{zsnap:.3f}'.replace('.', 'p')
+        return cat_dir / f'abacus_HF_{stracer}_{zsnap}_DR2_v1.0_AbacusSummit_base_c000_ph{imock:03d}_clustering.dat.fits'
     if version == 'abacus-hf-v2':
-        stracer = {'ELG_LOP': 'ELG'}.get(tracer, tracer)
-        sznap = f'{zsnap:.3f}'.replace('.', 'p')
-        cat_dir = desi_dir / f'mocks/cai/abacus_HF/DR2_v2.0/AbacusSummit_base_c000_ph{imock:03d}/Boxes/{stracer}'
-        return cat_dir / f'abacus_HF_{stracer}_{sznap}_DR2_v2.0_AbacusSummit_base_c000_ph{imock:03d}_{hod}_clustering.dat.h5'
+        stracer = {'ELG_LOP': 'ELG', 'QSO': 'QSO','QSO_lorentzian': 'QSO'}.get(tracer, tracer)
+        zrange = get_zrange_from_snap(tracer, zsnap=zsnap, version=version)
+        zsnap = f'{zsnap:.3f}'.replace('.', 'p')
+        if 'lorentzian' in tracer:
+            cat_dir = desi_dir / f'mocks/cai/abacus_HF/DR2_v2.0/AbacusSummit_base_c000_ph{imock:03d}/Boxes/{tracer}'
+            return cat_dir / f'abacus_HF_{stracer}_{zsnap}_{stracer}_fit_dv_AbacusSummit_base_c000_ph{imock:03d}_{hod}_z{zrange[0]}_{zrange[-1]}_clustering.dat.h5'
+        else:
+            cat_dir = desi_dir / f'mocks/cai/abacus_HF/DR2_v2.0/AbacusSummit_base_c000_ph{imock:03d}/Boxes/{stracer}'
+            return cat_dir / f'abacus_HF_{stracer}_{zsnap}_DR2_v2.0_AbacusSummit_base_c000_ph{imock:03d}_{hod}_clustering.dat.h5'
+        
     if version == 'uchuu-hf':
         stracer = {'ELG_LOP': 'ELG'}.get(tracer, tracer)
-        sznap = (f'{zsnap:.1f}' if zsnap in [0.7, 1.9] else f'{zsnap:.2f}').replace('.', 'p')
-        if 'LRG' in stracer: sznap = f'z{sznap}'
+        zsnap = (f'{zsnap:.1f}' if zsnap in [0.7, 1.9] else f'{zsnap:.2f}').replace('.', 'p')
+        if 'LRG' in stracer: zsnap = f'z{zsnap}'
         cat_dir = desi_dir / f'mocks/cai/Uchuu-SHAM/Y3-v2.0/{imock:04d}/Boxes/{stracer}/'
-        return cat_dir / f'Uchuu-{stracer}_box_{sznap}.h5'
+        return cat_dir / f'Uchuu-{stracer}_box_{zsnap}.h5'
     raise ValueError(f'version {version} not recognized')
 
 

@@ -10,7 +10,7 @@ setup_logging()
 THEORY_MODELS = ["folpsD", "folpsEFT", "reptvelocileptors"]
 COSMO_MODELS = ["base", "base_ns-fixed", "fixed"]
 PRIOR_BASES = ["physical", "physical_aap", "tcm_chudaykin_aap", "standard"]
-SAMPLERS = ["emcee", "mcmc", "pocomc"]
+SAMPLERS = ["emcee", "mh", "pocomc"]
 KRANGES = {
     "mesh2_spectrum": [{"ells": 0, "k": [0.02, 0.30, 0.01]}, {"ells": 2, "k": [0.02, 0.30, 0.01]}],
     "mesh3_spectrum": [{"ells": (0, 0, 0), "k": [0.02, 0.20, 0.01]}, {"ells": (2, 0, 2), "k": [0.02, 0.10, 0.01]}],
@@ -102,14 +102,17 @@ def build_likelihoods_options(**kwargs):
 def build_run_options(**kwargs):
     from full_shape import tools
     template, cosmo_model = kwargs.pop('template', 'direct'), kwargs.pop('cosmo_model', 'base')
-    sampler, nchains, resume, thin_by, max_eigen_gr = kwargs.pop('sampler', 'mcmc'), kwargs.pop('nchains', 1), kwargs.pop('resume', False), kwargs.pop('thin_by', 1), kwargs.pop('max_eigen_gr', 0.02)
+    sampler, nchains, resume, thinning, gelman_rubin = kwargs.pop('sampler', 'mh'), kwargs.pop('nchains', 1), kwargs.pop('resume', False), kwargs.pop('thinning', 1), kwargs.pop('gelman_rubin', 0.02)
     options = {}
     options["likelihoods"] = build_likelihoods_options(**kwargs)
     options["cosmology"] = {"template": template, "model": cosmo_model}
-    sampler_run = {"thin_by": thin_by, "check": {"max_eigen_gr": max_eigen_gr}}
-    if sampler == 'pocomc':
-        sampler_run.pop('thin_by', None)
-    options["sampler"] = {"sampler": sampler, "nchains": nchains, "resume": resume, "run": sampler_run}
+    options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
+    sampler_kw = {'nparallel': nchains, "gelman_rubin": gelman_rubin, 'thinning': thinning}
+    for section in ['init', 'run']:
+        for name, value in options['sampler'][section].items():
+            if name in sampler_kw:
+                options['sampler'][section][name] = sampler_kw[name]
+    options['sampler']['resume'] = resume
     return tools.fill_fiducial_options(options)
 
 
@@ -117,7 +120,7 @@ def run_fit(
     actions=("profile",), stats=["mesh2_spectrum"], version="abacus-hf-dr2-v2-altmtl", covariance="holi-v3-altmtl",
     tracers=None, auw=False, thetacut=False, pkmin=None, pkmax=None,
     template="direct", cosmo_model='base', theory_model="folpsD", prior_basis="physical_aap",
-    sampler="mcmc", nchains=1, thin_by=1, resume=False, max_eigen_gr=0.02,
+    sampler="mcmc", nchains=1, thinning=1, resume=False, gelman_rubin=0.02,
     fits_dir=DEFAULT_FITS_DIR, cache_dir=DEFAULT_CACHE_DIR,
 ):
     # Everything inside this function will be executed on the compute nodes;
@@ -143,7 +146,7 @@ def run_fit(
         stats=stats, version=version, covariance=covariance,
         tracers=tracers, auw=auw, thetacut=thetacut, pkmin=pkmin, pkmax=pkmax,
         template=template, theory_model=theory_model, prior_basis=prior_basis, cosmo_model=cosmo_model,
-        sampler=sampler, nchains=nchains, thin_by=thin_by, resume=resume, max_eigen_gr=max_eigen_gr
+        sampler=sampler, nchains=nchains, thinning=thinning, resume=resume, gelman_rubin=gelman_rubin
     )
     if mpicomm.rank == 0:
         print('fit options:')
@@ -153,15 +156,17 @@ def run_fit(
     run_fit_from_options(actions, **options, get_fits_fn=get_fits_fn, cache_dir=cache_dir)
     if "profile" in actions:
         likelihood = get_likelihood(likelihoods_options=options["likelihoods"], cosmology_options=options["cosmology"], cache_dir=cache_dir)
-        profiles = Profiles.load(get_fits_fn(kind="profiles", **options))
-        likelihood(**profiles.bestfit.choice(input=True, index="argmax"))
+        profiles = Profiles.read(get_fits_fn(kind='profiles', **options))
+        # Evaluate likelihood at dictionary of parameters
+        best = profiles.choice(index='argmax', squeeze=True).select(input=True).best
+        compile(likelihood)(**best)
         if mpicomm.rank == 0:
             plot_dir = get_fits_fn(kind="profiles", **options).parent
             for ilikelihood, sublikelihood in enumerate(likelihood.likelihoods):
                 for iobservable, observable in enumerate(sublikelihood.observables):
-                    plot_covariance = sublikelihood.covariance.at.observable.get(observables=observable.name)
-                    plot_covariance = plot_covariance.at.observable.match(observable.data)
-                    observable.covariance = plot_covariance
+                    #plot_covariance = sublikelihood.covariance.at.observable.get(observables=observable.name)
+                    #plot_covariance = plot_covariance.at.observable.match(observable.data)
+                    #observable.covariance = plot_covariance
                     observable.plot(fn=plot_dir / f"plot_likelihood{ilikelihood}_observable{iobservable}.png")
 
 
@@ -190,14 +195,14 @@ def get_parser():
              "base_ns-fixed varies h, omega_cdm, omega_b, logA; "
              "fixed varies only nuisance parameters. Defaults to %(default).")
     parser.add_argument(
-        "--sampler", type=str, default='mcmc', choices=SAMPLERS,
+        "--sampler", type=str, default='mh', choices=SAMPLERS,
         help="desilike sampler backend to use. Defaults to %(default)s.")
     parser.add_argument("--nchains", type=int, default=1, help="Number of MCMC chains to run with desilike. Defaults to 1.")
     parser.add_argument(
-        "--thin_by", type=int, default=1,
+        "--thinning", type=int, default=1,
         help="Thin samples by this factor while the desilike sampler is running. Defaults to 1.")
     parser.add_argument("--resume", action="store_true", help="Resume sampling from existing chain files in the derived fits directory.")
-    parser.add_argument('--max_eigen_gr', type=float, default=0.02, help='default is %(default)s')
+    parser.add_argument('--gelman_rubin', type=float, default=0.02, help='default is %(default)s')
     parser.add_argument(
         "--fits_dir", type=Path, default=DEFAULT_FITS_DIR,
         help="Base directory for fits. Defaults to %(default)s.")
@@ -216,5 +221,5 @@ if __name__ == "__main__":
         actions=tuple(args.todo), stats=args.stats, version=args.dataset, covariance=args.covariance,
         tracers=args.tracers, auw=args.auw, thetacut=args.thetacut, pkmin=args.pkmin, pkmax=args.pkmax,
         template="direct", theory_model=args.theory_model, prior_basis=args.prior_basis, cosmo_model=args.cosmo_model,
-        sampler=args.sampler, nchains=args.nchains, thin_by=args.thin_by, resume=args.resume, max_eigen_gr=args.max_eigen_gr,
+        sampler=args.sampler, nchains=args.nchains, thinning=args.thinning, resume=args.resume, gelman_rubin=args.gelman_rubin,
         fits_dir=fits_dir, cache_dir=args.cache_dir)

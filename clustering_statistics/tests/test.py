@@ -7,8 +7,8 @@ import os
 import sys
 import copy
 import functools
+import logging
 from pathlib import Path
-from unittest import mock
 
 import jax
 import numpy as np
@@ -384,80 +384,6 @@ def test_window_fm(tracer='QSO'):
         postprocess_stats_from_options(['combine_window_mesh2_spectrum'], get_stats_fn=get_stats_fn, **(options | {'catalog': catalog_options | dict(region=region)}), analysis=analysis)
 
 
-def test_interp_window():
-    from clustering_statistics.tools import interpolate_window_realizations
-
-    def get_spectrum2_data(size=20):
-        edges = np.linspace(0., 0.2, size + 1)
-        edges = np.column_stack([edges[:-1], edges[1:]])
-        k = np.mean(edges, axis=-1)
-        value = np.zeros_like(k)
-        ells = [0, 2, 4]
-        data = [types.Mesh2SpectrumPole(k=k, num_raw=value, k_edges=edges, ell=ell) for ell in ells]
-        return types.Mesh2SpectrumPoles(data)
-
-    def get_spectrum2_window(observable, size=40):
-        edges = np.linspace(0., 0.2, size + 1)
-        edges = np.column_stack([edges[:-1], edges[1:]])
-        k = np.mean(edges, axis=-1)
-        ells = [0, 2, 4]
-        theory = [types.Mesh2SpectrumPole(k=k, num_raw=np.zeros_like(k), k_edges=edges, ell=ell) for ell in ells]
-        theory = types.ObservableTree(theory, ells=ells, wa_orders=[0] * len(ells))
-        window = np.zeros((observable.size, theory.size))
-        return types.WindowMatrix(observable=observable, theory=theory, value=window)
-
-    observable = get_spectrum2_data()
-    window_geometry = get_spectrum2_window(observable)
-    window_realizations = []
-    rng = np.random.RandomState(42)
-    for ireal in range(20):
-        # mask = compute for some theory bins only
-        #theory = window_geometry.theory.map(lambda pole: pole.clone(nmodes=1. * (rng.uniform(size=pole.size) < 0.8)))
-        theory = window_geometry.theory.map(lambda pole: pole.clone(nmodes=1. * (np.arange(pole.size) % 3 == 0)))
-        window_realization = window_geometry.clone(value=rng.uniform(size=window_geometry.shape), theory=theory)
-        window_realizations.append(window_realization)
-    #method = 'spline'
-    method = 'gaussian_process'
-    window = interpolate_window_realizations(window_geometry, window_realizations=window_realizations, method=method)
-
-
-def test_interp_window():
-    from clustering_statistics.tools import interpolate_window_realizations
-
-    def get_spectrum2_data(size=20):
-        edges = np.linspace(0., 0.2, size + 1)
-        edges = np.column_stack([edges[:-1], edges[1:]])
-        k = np.mean(edges, axis=-1)
-        value = np.zeros_like(k)
-        ells = [0, 2, 4]
-        data = [types.Mesh2SpectrumPole(k=k, num_raw=value, k_edges=edges, ell=ell) for ell in ells]
-        return types.Mesh2SpectrumPoles(data)
-
-    def get_spectrum2_window(observable, size=40):
-        edges = np.linspace(0., 0.2, size + 1)
-        edges = np.column_stack([edges[:-1], edges[1:]])
-        k = np.mean(edges, axis=-1)
-        ells = [0, 2, 4]
-        theory = [types.Mesh2SpectrumPole(k=k, num_raw=np.zeros_like(k), k_edges=edges, ell=ell) for ell in ells]
-        theory = types.ObservableTree(theory, ells=ells, wa_orders=[0] * len(ells))
-        window = np.zeros((observable.size, theory.size))
-        return types.WindowMatrix(observable=observable, theory=theory, value=window)
-
-    observable = get_spectrum2_data()
-    window_geometry = get_spectrum2_window(observable)
-    window_realizations = []
-    rng = np.random.RandomState(42)
-    for ireal in range(20):
-        # mask = compute for some theory bins only
-        #theory = window_geometry.theory.map(lambda pole: pole.clone(nmodes=1. * (rng.uniform(size=pole.size) < 0.8)))
-        theory = window_geometry.theory.map(lambda pole: pole.clone(nmodes=1. * (np.arange(pole.size) % 3 == 0)))
-        window_realization = window_geometry.clone(value=rng.uniform(size=window_geometry.shape), theory=theory)
-        window_realizations.append(window_realization)
-    #method = 'spline'
-    method = 'gaussian_process'
-    window = interpolate_window_realizations(window_geometry, window_realizations=window_realizations, method=method)
-
-
 def test_count3close():
     for tracer in ['BGS_BRIGHT-21.35', 'LRG', 'ELG_LOPnotqso', 'QSO'][1:2]:
         for zrange in tools.propose_fiducial('zranges', tracer):
@@ -683,5 +609,4 @@ if __name__ == '__main__':
     # test_norm()
     # test_recon()
     # test_covariance()
-    # test_interp_window()
     # jax.distributed.shutdown()

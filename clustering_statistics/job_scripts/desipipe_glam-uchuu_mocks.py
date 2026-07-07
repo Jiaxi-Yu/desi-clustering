@@ -116,8 +116,8 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
 if __name__ == '__main__':
 
     stats, postprocess = [], []
-    # version  = 'glam-uchuu-v2-altmtl'
-    version  = 'glam-uchuu-bgs-altmtl'
+    version  = 'glam-uchuu-v2-altmtl'
+    # version  = 'glam-uchuu-bgs-altmtl'
     check_for_existing_measurements = True
     postprocess_only = False # If True, no measurements are performed and only postprocessing of existing measurements is handled.
 
@@ -128,12 +128,14 @@ if __name__ == '__main__':
     # stats_dir  = Path(os.getenv('SCRATCH')) / 'cai-dr2-benchmarks' 
 
     # to run job
-    # mode = 'interactive'
-    mode = 'slurm'
+    mode = 'interactive'
+    # mode = 'slurm'
     # imocks2run = np.arange(2000)
-    imocks2run = np.arange(1500)
+    imocks2run = 150 + np.arange(50)
     if version == 'glam-uchuu-v2-altmtl':
-        imocks2run = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)
+        #imocks2run = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)
+        good_imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance_v2.txt', dtype=int)
+        imocks2run = imocks2run[np.isin(imocks2run, good_imocks)]
     stats_dir  = tools.base_stats_dir
 
     # run fiducial full_shape
@@ -151,17 +153,17 @@ if __name__ == '__main__':
     # postregions = ['GCcomb']
 
     # run data_splits for lensing group with full_shape setup 
-    stats   = ['mesh2_spectrum', 'mesh3_spectrum']
+    stats   = ['mesh2_spectrum']#, 'mesh3_spectrum']
     analysis = 'full_shape'
     project = f'{analysis}/data_splits'
-    weight  = 'default-FKP'
+    weight  = 'default-noimsys-FKP'
     # regions = ['NGC', 'SGC'] # already computed under full_shape/base/
     regions = ['N', 'NGCnoN', 'S', 'SGCnoDES'] # galactic and imaging regions
     regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i}' for i in [40, 60]] # lensing regions
-    # tracers = ['QSO', 'ELG_LOPnotqso', 'LRG']
-    tracers = ['BGS_BRIGHT-21.35']
-    max_mocks_per_batch_qso = 30
-    max_mocks_per_batch_others = 15
+    tracers = [ 'LRG', 'QSO', 'ELG_LOPnotqso']
+    # tracers = ['BGS_BRIGHT-21.35']
+    max_mocks_per_batch_qso = 50
+    max_mocks_per_batch_others = 50
     # postprocess = ['combine_regions']
     # postregions = ['GCcomb', 'NS', 'GCcomb_noN', 'GCcomb_noDES'][1:]
 

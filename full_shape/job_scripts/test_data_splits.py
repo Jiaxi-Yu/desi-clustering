@@ -81,7 +81,7 @@ def _build_likelihoods_options(stats, tracers, regions, version, covariance, sta
 
 def _build_run_options(stats, tracers, regions, version, covariance, stats_dir, theory_model,
                        project='', cov_stats_dir=None, cosmo_model='base',
-                       template='direct', sampler='emcee', nchains=1, thin_by=1, resume=False,
+                       template='direct', sampler='emcee', nchains=1, thinning=1, resume=False,
                        prior_basis='physical_aap', weight='default-FKP', cut=False, auw=False):
     options = {}
     options['likelihoods'] = _build_likelihoods_options(
@@ -100,12 +100,13 @@ def _build_run_options(stats, tracers, regions, version, covariance, stats_dir, 
         auw=auw,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model}
-    options['sampler'] = {
-        'sampler': sampler,
-        'nchains': nchains,
-        'resume': resume,
-        'run': {'thin_by': thin_by},
-    }
+    options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
+    sampler_kw = {'nparallel': nchains, 'thinning': thinning}
+    for section in ['init', 'run']:
+        for name, value in options['sampler'][section].items():
+            if name in sampler_kw:
+                options['sampler'][section][name] = sampler_kw[name]
+    options['sampler']['resume'] = resume
     return tools.fill_fiducial_options(options)
 
 def run_fit(actions=('profile',), template='direct', stats=['mesh2_spectrum'],
@@ -114,7 +115,7 @@ def run_fit(actions=('profile',), template='direct', stats=['mesh2_spectrum'],
             covariance='holi-v3-altmtl', cov_stats_dir=None, cache_dir = None, 
             theory_model='folpsD', cosmo_model='base', 
             sampler='emcee', nchains=1, 
-            thin_by=1, resume=False, prior_basis='physical_aap',
+            thinning=1, resume=False, prior_basis='physical_aap',
             weight='default-FKP', cut=False, auw=False):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
@@ -146,7 +147,7 @@ def run_fit(actions=('profile',), template='direct', stats=['mesh2_spectrum'],
         template=template,
         sampler=sampler,
         nchains=nchains,
-        thin_by=thin_by,
+        thinning=thinning,
         resume=resume,
         prior_basis=prior_basis,
         weight=weight,
@@ -159,15 +160,17 @@ def run_fit(actions=('profile',), template='direct', stats=['mesh2_spectrum'],
         likelihood = get_likelihood(likelihoods_options=options['likelihoods'],
                                     cosmology_options=options['cosmology'],
                                     cache_dir=cache_dir if cache_dir else fits_dir / '_cache')
-        profiles = Profiles.load(get_fits_fn(kind='profiles', **options))
-        likelihood(**profiles.bestfit.choice(input=True, index='argmax'))
+        profiles = Profiles.read(get_fits_fn(kind='profiles', **options))
+        # Evaluate likelihood at dictionary of parameters
+        best = profiles.choice(index='argmax', squeeze=True).select(input=True).best
+        compile(likelihood)(**best)
         if mpicomm.rank == 0:
             plot_dir = get_fits_fn(kind='profiles', **options).parent
             for ilikelihood, sublikelihood in enumerate(likelihood.likelihoods):
                 for iobservable, observable in enumerate(sublikelihood.observables):
-                    plot_covariance = sublikelihood.covariance.at.observable.get(observables=observable.name)
-                    plot_covariance = plot_covariance.at.observable.match(observable.data)
-                    observable.covariance = plot_covariance
+                    #plot_covariance = sublikelihood.covariance.at.observable.get(observables=observable.name)
+                    #plot_covariance = plot_covariance.at.observable.match(observable.data)
+                    #observable.covariance = plot_covariance
                     observable.plot(fn=plot_dir / f'plot_likelihood{ilikelihood}_observable{iobservable}.png')
 
 ########################################################################################################################################################################################
@@ -210,7 +213,7 @@ if __name__ == '__main__':
                         help='Base directory for covariance mocks. Defaults to stats_dir.')
     parser.add_argument('--nchains', type=int, default=4,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
-    parser.add_argument('--thin_by', type=int, default=1,
+    parser.add_argument('--thinning', type=int, default=1,
                         help='Thin samples by this factor while the desilike sampler is running. Defaults to 1.')
     parser.add_argument('--resume', action='store_true',
                         help='Resume sampling from existing chain files in the derived fits directory.')
@@ -247,5 +250,5 @@ if __name__ == '__main__':
                     covariance=covariance, cov_stats_dir=cov_stats_dir, cache_dir=cache_dir, 
                     theory_model=args.theory_model, # fitting model settings
                     cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains, # sampling settings
-                    thin_by=args.thin_by, resume=args.resume, prior_basis=args.prior_basis,
+                    thinning=args.thinning, resume=args.resume, prior_basis=args.prior_basis,
                     weight=args.weight, cut=thetacut, auw=auw)

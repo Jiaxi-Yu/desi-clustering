@@ -11,6 +11,7 @@ classifiers = ["Programming Language :: Python :: 3"]
 
 [project.scripts]
 clustering-stats = "clustering_statistics.compute_stats:main"
+clustering-catalog-blinding = "clustering_statistics.catalog_blinding.cli:main"
 
 [tool.setuptools]
-packages = ["clustering_statistics", "full_shape"]
+packages = ["clustering_statistics", "clustering_statistics.catalog_blinding", "full_shape", "bao", "cosmo", "cosmo.cobaya", "cosmo.cobaya.external_likelihoods", "cosmo.cobaya.external_likelihoods.bao", "cosmo.cobaya.external_likelihoods.bbn", "cosmo.cobaya.external_likelihoods.sn", "cosmo.cobaya.external_likelihoods.cmb", "cosmo.cobaya.external_likelihoods.cmb.momento", "cosmo.job_scripts"]

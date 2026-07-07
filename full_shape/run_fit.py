@@ -1,16 +1,28 @@
 import os
+import shutil
 from pathlib import Path
 import functools
 import argparse
+import logging
 
-from full_shape.tools import get_likelihood, fill_fiducial_options, generate_likelihood_options_helper, setup_logging
+from desilike.base import compile, copy, Prior, Posterior, get_params
+from desilike.conditioning import AffineConditioner
+from desilike.samples import MCSamples, Profiles
+from desilike.profilers import Profiler
+from desilike.samplers import Sampler
+from desilike.distributed import get_mpicomm
+
+from full_shape.tools import get_likelihood, get_prior, fill_fiducial_options, generate_likelihood_options_helper, setup_logging
 from full_shape import tools
 from clustering_statistics import tools as clustering_tools
 
 
-def print_priors(calculator, varied=True, **kwargs):
+logger = logging.getLogger('fit')
+
+
+def print_priors(params):
     print(f"{'param':20} {'prior':50} {'reference':50} derived")
-    for p in calculator.all_params.select(varied=varied, **kwargs):
+    for p in params:
         print(f"{p.name:20} {str(p.prior):50} {str(p.ref):50} {p.derived}")
 
 
@@ -49,38 +61,65 @@ def run_fit_from_options(actions,
     likelihood = get_likelihood(likelihoods_options=options['likelihoods'],
                                 cosmology_options=options['cosmology'],
                                 get_stats_fn=get_stats_fn, cache_dir=cache_dir, cache_mode=cache_mode)
-    likelihood()
-    if likelihood.mpicomm.rank == 0:
-        print('likelihood priors:')
-        print_priors(likelihood)
+    mpicomm = get_mpicomm()
+    if mpicomm.rank == 0:
+        logger.info('priors:')
+        print_priors(get_params(likelihood).select(varied=True))
     fn = get_fits_fn(kind='config', **options, ext='yaml')
     tools.write_options(fn, options)
+    profiles_fn = get_fits_fn(kind='profiles', **options)
     for action in actions:
         if action == 'build':
             pass  # likelihood already built and cached above
-        elif action == 'sample':
-            sampler_options = dict(options['sampler'])
-            cls = tools.get_sampler_cls(sampler_options.pop('sampler', 'emcee'))
-            resume = sampler_options.pop('resume', False)
-            save_fn = [get_fits_fn(kind='chain', **options, ichain=ichain)\
-                       for ichain in range(sampler_options['nchains'])]
-            sampler_kwargs = dict(sampler_options['init'], save_fn=save_fn)
-            if resume:
-                missing = [fn for fn in save_fn if not Path(fn).exists()]
-                if missing:
-                    missing_str = ', '.join(str(fn) for fn in missing)
-                    raise FileNotFoundError(f'cannot resume sampling; missing chain file(s): {missing_str}')
-                sampler_kwargs['chains'] = save_fn
-            sampler = cls(likelihood, **sampler_kwargs)
-            sampler.run(**sampler_options['run'])
         elif action == 'profile':
             profiler_options = dict(options['profiler'])
             cls = tools.get_profiler_cls(profiler_options.pop('profiler', 'minuit'))
-            save_fn = get_fits_fn(kind='profiles', **options)
-            profiler = cls(likelihood, **profiler_options['init'], save_fn=save_fn)
-            profiler.maximize(**profiler_options['maximize'])
-            if profiler.mpicomm.rank == 0:
+            likelihood_profiler = copy(likelihood)
+            for param in get_params(likelihood_profiler).select(solved=True):
+                param.update(derived='best')
+            posterior = compile(Posterior(likelihood_profiler, prior=get_prior(likelihood_profiler)))
+            kw = dict(profiler_options.get('init', {}))
+            kernel = cls(**{name: kw.pop(name) for name in list(kw) if name not in ['rng', 'rescale', 'covariance']})
+            conditioner =  AffineConditioner(**{name: kw.pop(name, None) for name in ['rescale', 'covariance']})
+            profiler = Profiler(posterior, kernel=kernel, output_fn=profiles_fn, conditioner=conditioner, **kw)
+            profiler.maximize(**profiler_options.get('maximize', {}))
+            #profiler.covariance()
+            if mpicomm.rank == 0:
                 print(profiler.profiles.to_stats(tablefmt='pretty'))
+        elif action == 'sample':
+            sampler_options = dict(options['sampler'])
+            cls = tools.get_sampler_cls(sampler_options.pop('sampler', 'emcee'))
+            resume = sampler_options.pop('resume', True)
+            kw = sampler_options.get('init', {})
+            output_dir = get_fits_fn(kind='samples', **options).parent
+            if not resume and mpicomm.rank == 0:
+                 for path in Path(output_dir).glob('*'):
+                    if path.name != 'profiles.h5':
+                        shutil.rmtree(path) if path.is_dir() else path.unlink()
+            mpicomm.Barrier()
+            likelihood_sampler = copy(likelihood)
+            if kw.get('rescale', False):
+                profiles = Profiles.read(profiles_fn).choice(index='argmax', squeeze=True)
+                if profiles.error is None:
+                    logger.warn(f'Error is not provided in {profiles_fn}; skipping rescaling.')
+                    kw['rescale'] = False
+                best, error, covariance = profiles.best, profiles.error, profiles.covariance
+                kw['covariance'] = covariance
+                #error = {param: covariance.std(param) for param in covariance.names()}
+                for param in get_params(likelihood_sampler):
+                    if param.name in error:
+                        param.update(ref=dict(dist='norm', loc=best[param.name], scale=error[param.name]))
+            if kw.get('prior', None) is not None:
+                profiles = Profiles.read(profiles_fn).choice(index='argmax', squeeze=True)
+                if profiles.error is None:
+                    logger.warn(f'Error is not provided in {profiles_fn}; skipping prior.')
+                    kw['prior'] = None
+                kw['prior'] = kw['prior'] * profiles.covariance
+            posterior = compile(Posterior(likelihood_sampler, prior=get_prior(likelihood_sampler)))
+            kernel = cls(**{name: kw.pop(name) for name in list(kw) if name not in ['rng', 'rescale', 'covariance', 'nparallel', 'prior', 'batch_size']})
+            conditioner =  AffineConditioner(**{name: kw.pop(name, None) for name in ['rescale', 'covariance']})
+            sampler = Sampler(posterior, kernel=kernel, output_dir=output_dir, conditioner=conditioner, **kw)
+            sampler.run(**sampler_options.get('run', {}))
         else:
             raise NotImplementedError(f'{action} not implemented')
 
@@ -110,12 +149,12 @@ if __name__ == '__main__':
         help='Sky region (default: GCcomb).',
     )
     parser.add_argument(
-        '--data', type=str, default='abacus-2ndgen-complete',
-        help='Data product identifier (default: abacus-2ndgen-complete).',
+        '--data', type=str, default='abacus-hf-dr2-v2-altmtl',
+        help='Data product identifier (default: abacus-hf-dr2-v2-altmtl).',
     )
     parser.add_argument(
-        '--covariance', type=str, default='holi-v1-altmtl',
-        help='Covariance mock set (default: holi-v1-altmtl).',
+        '--covariance', type=str, default='holi-v3-altmtl',
+        help='Covariance mock set (default: holi-v3-altmtl).',
     )
     parser.add_argument(
         '--project', type=str, default='',

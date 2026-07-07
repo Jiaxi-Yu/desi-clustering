@@ -93,6 +93,7 @@ def compute_particle3_angular_upweights(*get_data_randoms):
             all_particles_parent.append({'data': particles['parent_data'], 'randoms': particles['parent_randoms']})
 
         theta = 10**np.arange(-4, np.log10(180.), 0.2)
+        #theta = 10**np.arange(-4, np.log10(180.), 0.4)
         battrs = BinAttrs(theta=theta)
 
         counts_fibered = _compute_particle3_correlation_close_pair_correction(all_particles_fibered, [battrs] * 3, auw=None, cut=None, veto23=None, normalize_randoms=False)

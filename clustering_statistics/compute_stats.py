@@ -30,18 +30,82 @@ import jax.experimental.multihost_utils
 import lsstypes as types
 
 from . import tools
-from .tools import fill_fiducial_options, _merge_options, Catalog, interpolate_window_realizations, _compute_binned_weight, setup_logging
+from .tools import fill_fiducial_options, _merge_options, Catalog, _compute_binned_weight, setup_logging
+from .catalog_blinding import bao as catalog_bao_blinding
+from .catalog_blinding import lss_catalogs as catalog_lss
 
-from .correlation2_tools import compute_particle2_angular_upweights, compute_particle2_correlation, compute_particle2_correlation_close_pair_correction
+from .correlation2_tools import compute_particle2_angular_upweights, compute_particle2_correlation, compute_particle2_correlation_close_pair_correction, compute_covariance_particle2_correlation
 from .spectrum2_tools import (compute_mesh2_spectrum, compute_mesh2_spectrum_close_pair_correction, compute_window_mesh2_spectrum, compute_covariance_mesh2_spectrum, run_preliminary_fit_mesh2_spectrum, compute_rotation_mesh2_spectrum, compute_window_mesh2_spectrum_fm)
 
 from .correlation3_tools import compute_particle3_angular_upweights, compute_particle3_correlation, compute_particle3_correlation_close_pair_correction
 from .spectrum3_tools import compute_mesh3_spectrum, compute_window_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction
 
 from .recon_tools import compute_reconstruction
+from .systematic_templates import include_systematic_templates
 
 
 logger = logging.getLogger('summary-statistics')
+
+
+def _format_zrange_for_filename(zrange):
+    if zrange is None:
+        return 'zall'
+    try:
+        z0, z1 = zrange
+    except Exception:
+        return 'zall'
+    return f'z{float(z0):.1f}-{float(z1):.1f}'
+
+
+def _save_catalog_bao_blinded_catalogs(raw_data, raw_randoms, *, tracer, catalog_options,
+                                       blinding_options):
+    """Optionally save the LSS-like catalog-BAO state used by measurements."""
+    save_dir = blinding_options.get('save_catalog_dir') if blinding_options is not None else None
+    if save_dir is None:
+        return None
+    save_dir = Path(save_dir).expanduser().resolve(strict=False)
+    region = catalog_options.get('region', 'ALL')
+    zlabel = _format_zrange_for_filename(catalog_options.get('zrange', None))
+    prefix = blinding_options.get('save_catalog_prefix')
+    if prefix is None:
+        suffix = blinding_options.get('output_version_suffix', 'desiblind-bao-blinded')
+        prefix = f'{tracer}_{region}_{zlabel}_{suffix}'
+
+    mpicomm = getattr(raw_data, 'mpicomm', None)
+    rank = getattr(mpicomm, 'rank', 0)
+    if rank == 0:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    if mpicomm is not None:
+        mpicomm.Barrier()
+
+    data_fn = save_dir / f'{prefix}_clustering.dat.fits'
+    raw_data.write(str(data_fn))
+
+    random_paths = []
+    save_randoms = str(blinding_options.get('save_randoms', 'diagnostic')).lower()
+    save_random_index = int(blinding_options.get('save_random_index', 0))
+    random_list = list(raw_randoms) if isinstance(raw_randoms, (list, tuple)) else [raw_randoms]
+    if save_randoms not in {'none', 'diagnostic', 'all'}:
+        raise ValueError("catalog_bao_blinding save_randoms must be one of: 'none', 'diagnostic', 'all'")
+    if save_randoms == 'all':
+        selected = list(enumerate(random_list))
+    elif save_randoms == 'diagnostic':
+        if not (0 <= save_random_index < len(random_list)):
+            raise ValueError(f'save_random_index={save_random_index} outside available random range [0, {len(random_list) - 1}]')
+        selected = [(save_random_index, random_list[save_random_index])]
+    else:
+        selected = []
+
+    for iran, random in selected:
+        random_fn = save_dir / f'{prefix}_{iran}_clustering.ran.fits'
+        random.write(str(random_fn))
+        random_paths.append(random_fn)
+
+    if rank == 0:
+        logger.info('Saved catalog-level BAO/AP blinded data catalog to %s', data_fn)
+        for random_fn in random_paths:
+            logger.info('Saved catalog-level BAO/AP blinded random catalog to %s', random_fn)
+    return {'data': data_fn, 'randoms': random_paths}
 
 
 def _expand_cut_auw_options(stat, options):
@@ -120,9 +184,60 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
     # tracers is a list of tracer1, tracer2, ... for cross-correlations
     tracers = list(catalog_options.keys())
 
+    # Minimal catalog-level BAO/AP on-the-fly path to desiblind. This is deliberately
+    # separate from statistic/data-vector blinding in tools.apply_blinding.
+    # The old generic catalog['blinding'] workflow has been removed; use this
+    # explicit option only when desiblind.CatalogBAOBlinder should be applied
+    # in memory before prepare_catalog.
+    catalog_bao_blinding_options = {}
+    for tracer in tracers:
+        if 'blinding' in catalog_options[tracer]:
+            raise ValueError(
+                "catalog['blinding'] was the removed desi-clustering-native catalog-blinding workflow. "
+                "Use catalog['catalog_bao_blinding'] for the desiblind BAO/AP on-the-fly path, "
+                "or pre-generate catalogs with desiblind and pass them as a normal cat_dir."
+            )
+        catalog_bao_blinding_options[tracer] = catalog_bao_blinding.resolve_options(
+            catalog_options[tracer].pop('catalog_bao_blinding', None),
+            tracer=tracer,
+            zrange=catalog_options[tracer].get('zrange', None),
+        )
+    catalog_bao_blinded_tracers = [tracer for tracer, options in catalog_bao_blinding_options.items() if options is not None]
+    with_catalog_bao_blinding = bool(catalog_bao_blinded_tracers)
+    if with_catalog_bao_blinding and len(catalog_bao_blinded_tracers) != len(tracers):
+        raise ValueError(
+            'catalog_bao_blinding must be configured for every tracer in this measurement, or for none. '
+            f'Got catalog BAO blinding for {catalog_bao_blinded_tracers}, but measurement tracers are {tracers}. '
+            'Partial catalog-level blinding would make it ambiguous whether statistic/data-vector blinding should be suppressed.'
+        )
+
     # Create redshift range lists for each tracer (support multiple z-bins)
     zranges = {tracer: _make_list_zrange(catalog_options[tracer].pop('zrange')) for tracer in tracers}
     region = {tracer: catalog_options[tracer].get('region') for tracer in tracers}
+
+    # Measurement filenames should not collide with unblinded products. Keep
+    # input catalog options untouched, but add an output-only version suffix for
+    # desiblind catalog-BAO measurements unless the user disables it.
+    output_catalog_options = copy.deepcopy(catalog_options)
+    for tracer, blinding_options in catalog_bao_blinding_options.items():
+        if blinding_options is not None:
+            output_catalog_options[tracer]['version'] = catalog_bao_blinding.output_version(
+                output_catalog_options[tracer].get('version', None), blinding_options)
+
+    catalog_bao_blinding_attrs = {}
+    for tracer, blinding_options in catalog_bao_blinding_options.items():
+        if blinding_options is not None:
+            for key, value in catalog_bao_blinding.attrs(blinding_options).items():
+                name = key if len(tracers) == 1 else f'{key}_{tracer}'
+                catalog_bao_blinding_attrs[name] = value
+
+    def update_catalog_bao_blinding_attrs(statistic):
+        if catalog_bao_blinding_attrs and hasattr(statistic, 'attrs'):
+            statistic.attrs.update(catalog_bao_blinding_attrs)
+        return statistic
+
+    def write_stats(filename, statistic):
+        return tools.write_stats(filename, update_catalog_bao_blinding_attrs(statistic))
 
     # Wrap catalog readers with catalog filename lookup function
     if get_catalog_fn is not None:
@@ -130,24 +245,47 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
         prepare_catalog = functools.partial(prepare_catalog, mask_catalog=mask_catalog)
 
     # Check if any statistic requires reconstruction
-    with_recon = any('recon' in stat for stat in stats)
+    with_recon = any('recon' in stat and 'covariance' not in stat for stat in stats)
     with_catalogs = True
 
     # Initialize catalogs and randoms dictionaries
     data, randoms, raw_randoms, raw_full_data = {}, {}, {}, {}
     with_stats_blinding = False
+    suppressed_stats_blinding_tracers = []
     if with_catalogs:
         # Load data and random catalogs for each tracer
         for tracer in tracers:
             _catalog_options = dict(catalog_options[tracer])
-            _catalog_options['region'] = 'ALL'
-            # Expand redshift range to cover all requested z-bins
+            requested_region = _catalog_options.get('region')
+            # Historical compute_stats loads all regions up front, then masks to
+            # the requested region for each statistic. For catalog-level BAO/AP
+            # blinding, LSS random resampling is region-local (e.g. NGC uses a
+            # DEC=32.375 split), so keep a single requested region instead of
+            # mixing NGC/SGC before resampling. Leave unblinded and ALL-region
+            # measurements on the historical path.
+            if catalog_bao_blinding_options[tracer] is None or requested_region in [None, 'ALL']:
+                _catalog_options['region'] = 'ALL'
+            # Expand redshift range for the catalog read. For catalog-level BAO/AP,
+            # match LSS catalog production: build the blinded clustering catalog and
+            # nbar/FKP columns over the full tracer nbar range, then mask to the
+            # requested measurement bin(s) later.
+            if catalog_bao_blinding_options[tracer] is not None:
+                nbar_zrange = catalog_lss.fiducial_nbar_zrange(tracer, zrange=None)
+                if nbar_zrange is not None:
+                    _catalog_options['zrange'] = nbar_zrange
+            else:
+                _catalog_options['zrange'] = (
+                    min(zrange[0] for zrange in zranges[tracer]),
+                    max(zrange[1] for zrange in zranges[tracer]),
+                )
 
             # Add bitwise weight information (PIP, completeness) if needed
             binned_weight = {}
             if any(name in _catalog_options.get('weight', '') for name in ['bitwise', 'compntile']):
                 # sets NTILE-MISSING-POWER (missing_power) and per-tile completeness (completeness)
                 raw_full_data[tracer] = read_catalog(kind='full_data', **_catalog_options)
+                raw_full_data[tracer] = catalog_bao_blinding.apply_to_catalogs(
+                    raw_full_data[tracer], catalog_bao_blinding_options[tracer])
                 binned_weight.update(raw_full_data[tracer].attrs)
             _catalog_options['binned_weight'] = binned_weight
 
@@ -157,24 +295,106 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 # pop as we don't need it anymore
                 _catalog_options |= {key: recon_options.pop(key) for key in list(recon_options) if key in ['nran']}
 
-            # Check if analysis requires blinding (e.g., protected samples)
-            with_stats_blinding |= tools.check_if_stats_requires_blinding(analysis=analysis, **_catalog_options)
+            # Check if analysis requires statistic/data-vector blinding (e.g.,
+            # protected samples). Do not stack it on top of catalog-level
+            # desiblind BAO/AP blinding.
+            stats_blinding_required = tools.check_if_stats_requires_blinding(analysis=analysis, **_catalog_options)
+            if stats_blinding_required and catalog_bao_blinding_options[tracer] is not None:
+                suppressed_stats_blinding_tracers.append(tracer)
+            else:
+                with_stats_blinding |= stats_blinding_required
             # Prepare incomplete catalog handling if completeness weights provided
             if isinstance(_catalog_options.get('complete', None), dict):
                 _catalog_options.setdefault('reshuffle', {})  # to pass on complete data
 
-            # Read data and random catalogs
-            data[tracer] = prepare_catalog(read_catalog(kind='data', **_catalog_options, concatenate=True), kind='data', **(_catalog_options | dict(keep_columns=True)))
+            # Read data and random catalogs. If requested, BAO/AP catalog
+            # blinding happens before prepare_catalog so POSITION is built from
+            # the desiblind-shifted redshift. Following the LSS catalog workflow,
+            # random redshift-dependent columns are then resampled from the
+            # shifted data rather than directly BAO-shifting the randoms.
+            raw_data_unblinded = read_catalog(kind='data', **_catalog_options, concatenate=True)
+            raw_data = catalog_bao_blinding.apply_to_catalogs(raw_data_unblinded, catalog_bao_blinding_options[tracer])
+            bao_nz_reweight = None
+            if catalog_bao_blinding_options[tracer] is not None and catalog_bao_blinding_options[tracer].get('apply_nz_reweight', True):
+                raw_data, bao_nz_reweight = catalog_lss.apply_bao_nz_reweight(
+                    raw_data_unblinded, raw_data,
+                    zcol_before=catalog_bao_blinding_options[tracer]['input_zcol'],
+                    zcol_after=catalog_bao_blinding_options[tracer]['output_zcol'],
+                    zmin=catalog_bao_blinding_options[tracer].get('nz_zmin', None),
+                    zmax=catalog_bao_blinding_options[tracer].get('nz_zmax', None),
+                    dz=catalog_bao_blinding_options[tracer].get('nz_dz', 0.01),
+                    copy=False,
+                )
+            bao_nz_extra_weight = None if bao_nz_reweight is None else bao_nz_reweight.get('correction')
+            if catalog_bao_blinding_options[tracer] is not None:
+                raw_data = catalog_lss.set_lss_pre_addnbar_weight(raw_data, extra_weight=bao_nz_extra_weight, copy=False)
+            data[tracer] = prepare_catalog(raw_data, kind='data', **(_catalog_options | dict(keep_columns=True)))
             binned_weight.update(data[tracer].attrs)  # update with any additional info from prepared data catalog
             #_catalog_options.pop('complete', None)
             #_catalog_options.pop('reshuffle', None)
-            raw_randoms[tracer] = read_catalog(kind='randoms', **_catalog_options, concatenate=False)
+            raw_randoms_unmatched = read_catalog(kind='randoms', **_catalog_options, concatenate=False)
+            if catalog_bao_blinding_options[tracer] is not None:
+                split_columns = catalog_lss.split_columns_for_region(
+                    _catalog_options.get('region'), tracer=tracer,
+                    split_columns=catalog_bao_blinding_options[tracer].get('random_split_columns'),
+                )
+                raw_randoms[tracer] = catalog_lss.resample_randoms_from_data(
+                    raw_randoms_unmatched, raw_data,
+                    columns=catalog_bao_blinding_options[tracer].get('random_resample_columns'),
+                    split_columns=split_columns,
+                    seed=catalog_bao_blinding_options[tracer].get('random_seed', 0),
+                    compmd=catalog_bao_blinding_options[tracer].get('random_compmd', 'ran'),
+                    copy=True,
+                )
+                nbar_zrange = catalog_lss.fiducial_nbar_zrange(tracer, zrange=_catalog_options.get('zrange'))
+                raw_data, raw_randoms[tracer], _ = catalog_lss.add_nbar_fkp(
+                    raw_data, raw_randoms[tracer],
+                    zcol=catalog_bao_blinding_options[tracer]['output_zcol'],
+                    zmin=nbar_zrange[0] if nbar_zrange is not None else None,
+                    zmax=nbar_zrange[1] if nbar_zrange is not None else None,
+                    dz=catalog_bao_blinding_options[tracer].get('nbar_dz', catalog_bao_blinding_options[tracer].get('nz_dz', 0.01)),
+                    p0=_catalog_options.get('FKP_P0', catalog_lss.fiducial_fkp_p0(tracer)),
+                    compmd=catalog_bao_blinding_options[tracer].get('random_compmd', 'ran'),
+                    randens=catalog_bao_blinding_options[tracer].get('randens', 2500.),
+                    data_extra_weight=bao_nz_extra_weight,
+                    copy=False,
+                )
+                # prepare_catalog may copy data columns, so refresh prepared data
+                # after add_nbar_fkp mutates raw_data in-place.
+                data[tracer] = prepare_catalog(raw_data, kind='data', **(_catalog_options | dict(keep_columns=True)))
+                binned_weight.update(data[tracer].attrs)
+                _save_catalog_bao_blinded_catalogs(
+                    raw_data, raw_randoms[tracer], tracer=tracer,
+                    catalog_options=_catalog_options,
+                    blinding_options=catalog_bao_blinding_options[tracer],
+                )
+            else:
+                raw_randoms[tracer] = raw_randoms_unmatched
             randoms[tracer] = prepare_catalog(raw_randoms[tracer], kind='randoms', **_catalog_options)
+            if tools.check_if_requires_renormalization(**_catalog_options):
+                for random in randoms[tracer]:
+                    tools.renormalize_randoms_over_data(random, data[tracer], tracer=tracer)
             catalog_options[tracer]['binned_weight'] = binned_weight  # store binned weight info in catalog options for later use in stats computation
+            output_catalog_options[tracer]['binned_weight'] = binned_weight
+
+    if with_catalog_bao_blinding and with_stats_blinding:
+        raise ValueError(
+            'Refusing to combine catalog-level BAO/AP blinding with statistic/data-vector blinding. '
+            'Use catalog_bao_blinding for all tracers to suppress statistic/data-vector blinding, '
+            'or disable catalog_bao_blinding and use the statistic/data-vector blinding path alone.'
+        )
 
     # Warn user if blinding will be applied
     if with_stats_blinding:
         warnings.warn('Output clustering statistics will be blinded on-the-fly.\nIf you do not want blinding, pass "protected" in the "analysis" argument.')
+    if suppressed_stats_blinding_tracers:
+        warnings.warn(
+            'Statistic/data-vector blinding would normally be applied for tracer(s) '
+            f'{suppressed_stats_blinding_tracers}, but catalog_bao_blinding is active; '
+            'not stacking both blinding layers.'
+        )
+    if with_catalog_bao_blinding:
+        warnings.warn('Input catalogs will be BAO/AP blinded with desiblind.CatalogBAOBlinder before measuring clustering statistics.')
 
     # Initialize reconstruction attributes storage
     stat_recon_attrs = {}
@@ -208,7 +428,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             for tracer in tracers:
                 zdata[tracer] = mask_catalog(data[tracer], 'data', region=region[tracer], zrange=zrange[tracer])
                 zrandoms[tracer] = [mask_catalog(random, 'randoms', region=region[tracer], zrange=zrange[tracer]) for random in randoms[tracer]]
-        fn_catalog_options = {tracer: catalog_options[tracer] | dict(zrange=zrange[tracer]) for tracer in tracers}
+        fn_catalog_options = {tracer: output_catalog_options[tracer] | dict(zrange=zrange[tracer]) for tracer in tracers}
 
         # Compute angular upweights for fiber collision corrections if requested
         auw_options = {}
@@ -235,7 +455,14 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         if tracer not in raw_full_data:
                             raw_full_data[tracer] = read_catalog(kind='full_data', **_catalog_options, concatenate=True)
                             #_catalog_options['binned_weight'].update(raw_full_data[tracer].attrs)  # update binned weight info for AUW computation
-                        _cache_auw[kind] = prepare_catalog(raw_randoms[tracer] if 'randoms' in kind else raw_full_data[tracer], kind=kind, **_catalog_options)
+                        if 'randoms' in kind:
+                            _cache_auw[kind] = prepare_catalog(raw_randoms[tracer], kind=kind, **_catalog_options)
+                            if tools.check_if_requires_renormalization(**_catalog_options):
+                                for random in _cache_auw[kind]:
+                                    tools.renormalize_randoms_over_data(random, _cache_auw[kind.replace('randoms', 'data')], tracer=tracer)
+                        else:
+                            _cache_auw[kind] = prepare_catalog(raw_full_data[tracer], kind=kind, **_catalog_options)
+
                     toret[kind] = _cache_auw[kind]
                 return toret
 
@@ -248,7 +475,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 else:
                     auw = func(*[functools.partial(get_data, tracer) for tracer in tracers])
                     # Write computed angular upweights to disk
-                    tools.write_stats(fn, auw)
+                    write_stats(fn, auw)
                 # Update all statistics options with computed angular upweights
                 for stat in stats_npt:
                     auw_options[stat] = auw  # update with angular upweight
@@ -304,7 +531,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         for key, kw in _expand_cut_auw_options(stat, correlation_options).items():
                             fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
                             if key != 'raw':
-                                tools.write_stats(fn, correlation[key])
+                                write_stats(fn, correlation[key])
                     else:
                         # Base calculation
                         correlation = func[0](*[functools.partial(get_data, tracer) for tracer in tracers], **correlation_options)
@@ -319,7 +546,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                             # Store reconstruction metadata
                             if recon:
                                 correlation[key].attrs.update(stat_recon_attrs)
-                            tools.write_stats(fn, correlation[key])
+                            write_stats(fn, correlation[key])
 
             # Map of spectrum statistics to computation functions
             funcs = {f'{recon}mesh2_spectrum': (compute_mesh2_spectrum, compute_mesh2_spectrum_close_pair_correction), f'{recon}mesh3_spectrum': (compute_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction)}
@@ -357,13 +584,13 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         for key, kw in _expand_cut_auw_options(stat, spectrum_options).items():
                             fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
                             if key != 'raw':
-                                tools.write_stats(fn, spectrum[key])
+                                write_stats(fn, spectrum[key])
                     else:
                         # Compute power spectrum or bispectrum
                         spectrum = func[0](*[functools.partial(get_data, tracer) for tracer in tracers], cache=cache, **spectrum_options)
                         # Ensure spectrum is a dictionary (may contain raw, cut, auw variants)
                         if not isinstance(spectrum, dict): spectrum = {'raw': spectrum}
-    
+
                         # Write all spectrum variants to disk
                         for key, kw in _expand_cut_auw_options(stat, spectrum_options).items():
                             fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
@@ -373,7 +600,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                             # Store reconstruction metadata
                             if recon:
                                 spectrum[key].attrs.update(stat_recon_attrs)
-                            tools.write_stats(fn, spectrum[key])
+                            write_stats(fn, spectrum[key])
 
         # Synchronize across all processes before proceeding to windows
         jax.experimental.multihost_utils.sync_global_devices('spectrum')  # wait for the writer
@@ -442,13 +669,13 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         # Also save under "geometry", to assemble with forward-modeled window "window_mesh2_spectrum_fm"
                         for suffix in ['', '_geometry']:  # FIXME the suffix won't be caught by list_stats
                             fn = get_stats_fn(kind=stat + suffix, catalog=fn_catalog_options, **kw)
-                            tools.write_stats(fn, window[key])
+                            write_stats(fn, window[key])
 
                 # Write raw correlation functions (intermediate products) to disk
                 for key in window:
                     if 'correlation' in key:  # window functions
                         fn = get_stats_fn(kind=key, catalog=fn_catalog_options, **(fn_window_options | dict(battrs={'s': None, 'pole': None}, cut=False, extra=extra)))
-                        tools.write_stats(fn, window[key])
+                        write_stats(fn, window[key])
         # Synchronize before window forward model computation
         jax.experimental.multihost_utils.sync_global_devices('window')  # wait for the writer
 
@@ -505,7 +732,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         kind=theory_stat,
                         catalog={tracer: fn_catalog_options[tracer] for tracer in tracers},
                     )
-                    tools.write_stats(theory_fn, theory)
+                    write_stats(theory_fn, theory)
 
                 # Synchronize before reading theory
                 jax.experimental.multihost_utils.sync_global_devices("theory")  # such that theory ready for window
@@ -545,91 +772,114 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                                 extra = f'{effect}_{listell}_seed={seed}'
 
                             options = fn_window_options | {"extra": extra, "region": _region, "zrange": _zrange}
-                            tools.write_stats(get_stats_fn(kind=stat, catalog=fn_catalog_options, **options), window[effect][(_region, _zrange)][i])
+                            write_stats(get_stats_fn(kind=stat, catalog=fn_catalog_options, **options), window[effect][(_region, _zrange)][i])
 
                 # synchronize here to avoid postprocess trying to load windows that haven't been written yet
                 jax.experimental.multihost_utils.sync_global_devices("window_fm_IO")  # wait for the writer
 
         # Covariance matrix computation
-        funcs = {'covariance_mesh2_spectrum': compute_covariance_mesh2_spectrum}
-        for stat, func in funcs.items():
-            if stat in stats:
-                covariance_options = dict(options[stat])
-                theory_stat = stat.replace('covariance_', 'theory_')
-                theory_fn = covariance_options.pop('theory', None)
+        for recon in ['', 'recon_']:
+            funcs = {f'covariance_{recon}mesh2_spectrum': compute_covariance_mesh2_spectrum, f'covariance_{recon}particle2_correlation': compute_covariance_particle2_correlation}
+            for stat, func in funcs.items():
+                if stat in stats:
+                    covariance_options = dict(options[stat])
+                    theory_stat = stat.replace('covariance_', 'theory_')
+                    theory_fn = covariance_options.pop('theory', None)
 
-                def get_data(tracer):
-                    # Prepare catalogs for covariance computation
-                    czrandoms = Catalog.concatenate(zrandoms[tracer])
-                    return {'data': zdata[tracer], 'randoms': czrandoms}
+                    def get_data(tracer):
+                        # Prepare catalogs for covariance computation
+                        czrandoms = Catalog.concatenate(zrandoms[tracer])
+                        return {'data': zdata[tracer], 'randoms': czrandoms}
 
-                def _check_fn(fn, tracers, name=''):
-                    # Convert single filename to tracer pair dictionary
-                    if len(tracers) == 1:
-                        fn = {(tracer, tracer): fn for tracer in tracers}
+                    def _check_fn(fn, tracers, name=''):
+                        # Convert single filename to tracer pair dictionary
+                        if len(tracers) == 1:
+                            fn = {(tracer, tracer): fn for tracer in tracers}
+                        else:
+                            raise ValueError(f'provide a dictionary of (tracer1, tracer2): {name} for tracer1, tracer2 in {tracers}')
+                        return fn
+
+                    def _read_tracer(fns, tracers2):
+                        # Read file for tracer pair (handle ordering)
+                        if tracers2 not in fns: tracers2 = tracers2[::-1]
+                        return types.read(fns[tracers2])
+
+                    if theory_fn is None:
+                        # Auto-compute fiducial theory from spectrum and window
+                        products_fn = {}
+                        # Collect power spectrum and window
+                        for name in ['spectrum', 'window']:
+                            kind_stat = {'spectrum': f'{recon}mesh2_spectrum', 'window': 'window_mesh2_spectrum'}[name]
+                            fn = covariance_options.pop(name, None)
+                            if fn is None:
+                                # Auto-detect measurement files for each tracer pair
+                                kw = options[kind_stat] | dict(auw=False, cut=False)
+                                fn = {(tracer, tracer): get_stats_fn(kind=kind_stat, catalog=fn_catalog_options[tracer], **kw) for tracer in tracers}
+                                # Add cross-correlation file if multiple tracers
+                                if len(tracers) > 1:
+                                    fn[tuple(tracers)] = get_stats_fn(kind=kind_stat, catalog=fn_catalog_options, **kw)
+                            elif not isinstance(fn, dict):
+                                _check_fn(fn, tracers, name=name)
+                            products_fn[name] = fn
+
+                        # Compute theory for each tracer pair
+                        theory_fn = {}
+                        for tracers2 in itertools.combinations_with_replacement(tracers, r=2):
+                            spectrum = _read_tracer(products_fn['spectrum'], tracers2)
+                            window = _read_tracer(products_fn['window'], tracers2)
+                            # Fit theory to measurement (preliminary fit for covariance)
+                            theory = run_preliminary_fit_mesh2_spectrum(data=spectrum, window=window, theory='recon' if recon else 'rept')
+                            theory_fn[tracers2] = get_stats_fn(kind=theory_stat, catalog=(fn_catalog_options[tracers2[0]] if tracers2[1] == tracers2[0] else {tracer: fn_catalog_options[tracer] for tracer in tracers2}))
+                            # Write theory to disk
+                            tools.write_stats(theory_fn[tracers2], theory)
                     else:
-                        raise ValueError(f'provide a dictionary of (tracer1, tracer2): {name} for tracer1, tracer2 in {tracers}')
-                    return fn
+                        _check_fn(theory_fn, tracers, name='theory')
 
-                def _read_tracer(fns, tracers2):
-                    # Read file for tracer pair (handle ordering)
-                    if tracers2 not in fns: tracers2 = tracers2[::-1]
-                    return types.read(fns[tracers2])
+                    # Synchronize before reading theory
+                    jax.experimental.multihost_utils.sync_global_devices('theory')  # such that theory ready for window
 
-                if theory_fn is None:
-                    # Auto-compute fiducial theory from spectrum and window
-                    products_fn = {}
-                    # Collect power spectrum and window
-                    for name in ['spectrum', 'window']:
-                        kind_stat = stat.replace('covariance_', '') if name == 'spectrum' else stat.replace('covariance_', f'{name}_')
-                        fn = covariance_options.pop(name, None)
-                        if fn is None:
-                            # Auto-detect measurement files for each tracer pair
-                            kw = options[kind_stat] | dict(auw=False, cut=False)
-                            fn = {(tracer, tracer): get_stats_fn(kind=kind_stat, catalog=fn_catalog_options[tracer], **kw) for tracer in tracers}
+                    # Load theory for all tracer pairs
+                    fields = {tracer: tools.get_simple_tracer(tracer) for tracer in tracers}
+                    theory = {tuple(fields[tracer] for tracer in tracers2): _read_tracer(theory_fn, tracers2) for tracers2 in itertools.product(tracers, repeat=2)}
+                    theory = types.ObservableTree(list(theory.values()), fields=list(theory.keys()))
+
+                    if 'particle2' in stat:
+                        RR_fn = covariance_options.pop('RR', None)
+                        kind_stat = stat.replace('covariance_', '')
+                        if RR_fn is None:
+                            kw = dict(auw=False, cut=False) | options[kind_stat]
+                            RR_fn = {(tracer, tracer): get_stats_fn(kind=kind_stat, catalog=fn_catalog_options[tracer], **kw) for tracer in tracers}
                             # Add cross-correlation file if multiple tracers
                             if len(tracers) > 1:
-                                fn[tuple(tracers)] = get_stats_fn(kind=kind_stat, catalog=fn_catalog_options, **kw)
-                        elif not isinstance(fn, dict):
-                            _check_fn(fn, tracers, name=name)
-                        products_fn[name] = fn
+                                RR_fn[tuple(tracers)] = get_stats_fn(kind=kind_stat, catalog=fn_catalog_options, **kw)
+                        elif not isinstance(RR_fn, dict):
+                            _check_fn(RR_fn, tracers, name=name)
+                        # Load RR for all tracer pairs
+                        RR = {tuple(fields[tracer] for tracer in tracers2): _read_tracer(RR_fn, tracers2) for tracers2 in itertools.product(tracers, repeat=2)}
+                        RR = {fields: RR[fields].get('RR') if 'count_names' in RR[fields].labels(return_type='keys') else RR[fields] for fields in RR}
+                        covariance_options['RR'] = types.ObservableTree(list(RR.values()), fields=list(RR.keys()))
 
-                    # Compute theory for each tracer pair
-                    theory_fn = {}
-                    for tracers2 in itertools.combinations_with_replacement(tracers, r=2):
-                        spectrum = _read_tracer(products_fn['spectrum'], tracers2)
-                        window = _read_tracer(products_fn['window'], tracers2)
-                        # Fit theory to measurement (preliminary fit for covariance)
-                        theory = run_preliminary_fit_mesh2_spectrum(data=spectrum, window=window)
-                        theory_fn[tracers2] = get_stats_fn(kind=theory_stat, catalog=(fn_catalog_options[tracers2[0]] if tracers2[1] == tracers2[0] else {tracer: fn_catalog_options[tracer] for tracer in tracers2}))
-                        # Write theory to disk
-                        tools.write_stats(theory_fn[tracers2], theory)
-                else:
-                    _check_fn(theory_fn, tracers, name='theory')
+                    # Compute covariance matrix
+                    covariance = func(*[functools.partial(get_data, tracer) for tracer in tracers], theory=theory, fields=list(fields.values()), **covariance_options)
 
-                # Synchronize before reading theory
-                jax.experimental.multihost_utils.sync_global_devices('theory')  # such that theory ready for window
+                    def add_label(covariance):
+                        # Add observables label, and fields => tracers
+                        simple_stat = tools.get_simple_stats(stat.replace('covariance_', ''))
+                        # Create observable tree with proper labels
+                        observable = types.ObservableTree(list(covariance.observable), observables=[simple_stat] * len(fields), tracers=covariance.observable.fields)
+                        return covariance.clone(observable=observable)
 
-                # Load theory for all tracer pairs
-                fields = {tracer: tools.get_simple_tracer(tracer) for tracer in tracers}
-                theory = {tuple(fields[tracer] for tracer in tracers2): _read_tracer(theory_fn, tracers2) for tracers2 in itertools.product(tracers, repeat=2)}
-                theory = types.ObservableTree(list(theory.values()), fields=list(theory.keys()))
+                    # Write covariance matrix to disk
+                    for key, kw in _expand_cut_auw_options(stat, covariance_options).items():
+                        fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
+                        if key in covariance:
+                            tools.write_stats(fn, add_label(covariance[key]))
 
-                # Compute covariance matrix
-                covariance = func(*[functools.partial(get_data, tracer) for tracer in tracers], theory=theory, fields=list(fields.values()), **covariance_options)
-
-                # Write covariance matrix to disk
-                for key, kw in _expand_cut_auw_options(stat, covariance_options).items():
-                    fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
-                    if key in covariance:
-                        tools.write_stats(fn, covariance[key])
-
-                # Write intermediate correlation functions to disk
-                for key in covariance:
-                    if 'correlation' in key:  # window functions
-                        fn = get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
-                        tools.write_stats(fn, covariance[key])
-
+                    # Write intermediate correlation functions to disk
+                    for key in covariance:
+                        if 'correlation' in key:  # window functions
+                            fn = get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
+                            tools.write_stats(fn, covariance[key])
 
 
 def list_stats(stats, get_stats_fn=tools.get_stats_fn, **kwargs):
@@ -657,6 +907,16 @@ def list_stats(stats, get_stats_fn=tools.get_stats_fn, **kwargs):
     kwargs = fill_fiducial_options(kwargs)
     catalog_options = kwargs['catalog']
     tracers = list(catalog_options.keys())
+    for tracer in tracers:
+        if 'blinding' in catalog_options[tracer]:
+            raise ValueError("catalog['blinding'] was removed; use catalog['catalog_bao_blinding'] or pre-generated blinded catalogs")
+        blinding_options = catalog_bao_blinding.resolve_options(
+            catalog_options[tracer].pop('catalog_bao_blinding', None),
+            tracer=tracer,
+            zrange=catalog_options[tracer].get('zrange', None),
+        )
+        if blinding_options:
+            catalog_options[tracer]['version'] = catalog_bao_blinding.output_version(catalog_options[tracer].get('version', None), blinding_options)
     # Build list of redshift ranges for each tracer
     zranges = {tracer: _make_list_zrange(catalog_options[tracer]['zrange']) for tracer in tracers}
 
@@ -682,7 +942,7 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
     ----------
     postprocess : str or list of str
         Postprocessing.
-        Choices: ['combine_regions', 'combine_window_mesh2_spectrum', 'rotation_mesh2_spectrum']
+        Choices: ['combine_regions', 'combine_window_mesh2_spectrum', 'rotation_mesh2_spectrum', 'systematic_templates']
     analysis : str, optional
         Type of analysis, 'full_shape' or 'png_local', to set fiducial options.
     get_stats_fn : callable, optional
@@ -701,15 +961,26 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
     options = fill_fiducial_options(kwargs, analysis=analysis)
     catalog_options = options['catalog']
     tracers = list(catalog_options.keys())
+    for tracer in tracers:
+        if 'blinding' in catalog_options[tracer]:
+            raise ValueError("catalog['blinding'] was removed; use catalog['catalog_bao_blinding'] or pre-generated blinded catalogs")
+        blinding_options = catalog_bao_blinding.resolve_options(
+            catalog_options[tracer].pop('catalog_bao_blinding', None),
+            tracer=tracer,
+            zrange=catalog_options[tracer].get('zrange', None),
+        )
+        if blinding_options:
+            catalog_options[tracer]['version'] = catalog_bao_blinding.output_version(catalog_options[tracer].get('version', None), blinding_options)
     # Set default region to combined
     for tracer in tracers:
         catalog_options[tracer].setdefault('region', 'GCcomb')  # default, for rotation, rotate
     # Build redshift range lists
     zranges = {tracer: _make_list_zrange(catalog_options[tracer]['zrange']) for tracer in tracers}
     # Default imock if not specified
-    if imocks is None: imocks = [catalog_options[tracers[0]].get('imock', None)]
+    if imocks is None:
+        imocks = [catalog_options[tracers[0]].get('imock', None)]
 
-    def _iter_on_mocks(options):
+    def _iter_on_mocks(options, imocks=imocks):
         # Helper to iterate over multiple mock realizations
         _options = copy.deepcopy(options)
         for imock in imocks:
@@ -737,7 +1008,7 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                     kwargs['catalog'] = {tracer: options['catalog'][tracer] | dict(region=region) for tracer in options['catalog']}
                     all_fns[region] = list_stats(stat, get_stats_fn=get_stats_fn, **kwargs)
                 stats = next(iter(all_fns.values())).keys()
-                # Combine each statistic variant
+                # Combine each statistic variant (auw, cut)
                 for stat in stats:
                     for ifn, (fn_comb, _) in enumerate(all_fns[region_comb][stat]):
                         fns = [all_fns[region][stat][ifn][0] for region in regions]  # [1] is kwargs
@@ -757,15 +1028,14 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                         _combine_stats(stat, region_comb, regions, get_stats_fn=get_stats_fn, **(options| {"extra": extra}))
                     else:
                         # Measurements need to loop over mocks
-                        for _options in _iter_on_mocks(options | dict(catalog=fn_catalog_options)):
-                            _combine_stats(stat, region_comb, regions, get_stats_fn=get_stats_fn, **(_options| {"extra": extra}))
+                        for _options in _iter_on_mocks(options | dict(catalog=fn_catalog_options), imocks=imocks):
+                            _combine_stats(stat, region_comb, regions, get_stats_fn=get_stats_fn, **(_options | {"extra": extra}))
 
         if 'combine_window_mesh2_spectrum' in postprocess:
             # Combine base window calculation with forward-modeled windows
             stat = 'window_mesh2_spectrum'
             combine_options = dict(options.get('combine_window_mesh2_spectrum', {}))
             effect = combine_options.pop('effect', 'RIC+AMR')
-            kw_interpolate = dict(combine_options)
             window_options = options.get(stat, {})
             window_fm_options = options.get(f'{stat}_fm', {})
             window_fm = None
@@ -795,6 +1065,29 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                 # Adding all effects
                 window = window_geometry.clone(value=window_geometry.value() + window_fm.value())
                 tools.write_stats(fn, window)
+
+        if 'systematic_templates' in postprocess:
+            stat = 'systematic_templates'
+            systematic_options = dict(options.get(stat, {}))
+            for stat in systematic_options.get('stats', []):
+                for window_fn, kw_window in list_stats(f'window_{stat}', get_stats_fn=get_stats_fn, catalog=fn_catalog_options, **{stat: options.get(stat, {}), f'window_{stat}': options.get(f'window_{stat}', {})})[f'window_{stat}']:
+                    window = types.read(window_fn)
+                    effects = list(systematic_options.get('effects', []))
+                    templates = {}
+                    for key, fns in systematic_options.get('templates', {}).items():
+                        if key == 'auw' and kw_window.get('cut', None):
+                            effects = [effect for effect in effects if effect != 'auw']
+                            continue
+                        if isinstance(fns, dict):
+                            imocks = fns.get('imock', imocks)
+                            fns = [get_stats_fn(kind=stat, **{**kw_window, 'imock': imock, 'auw': None, 'cut': None, **fns}) for imock in imocks]
+                        if not isinstance(fns, (tuple, list)):
+                            fns = [fns]
+                        templates[key] = types.mean([types.read(fn) for fn in fns])
+                    if effects:
+                        window = include_systematic_templates(window, templates=templates, effects=effects)
+                        fn = get_stats_fn(kind=f'window_{stat}', **kw_window, templates=list(effects))
+                        tools.write_stats(fn, window)
 
         if 'rotation_mesh2_spectrum' in postprocess:
             # Compute rotation matrix for power spectrum (corrections for systematic effects)

@@ -1,6 +1,7 @@
+import logging
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
-import logging
 
 
 logger = logging.getLogger('PNG fitting tools')
@@ -16,12 +17,16 @@ def read_data(data_dir='.', mocks_dir=None,
     from clustering_statistics.tools import get_stats_fn
 
     # Read the data:
-    pk = lsstypes.read(get_stats_fn(kind='mesh2_spectrum', stats_dir=data_dir, tracer=tracer, zrange=zrange, weight=weight_type, region=region))
+    fn = get_stats_fn(kind='mesh2_spectrum', stats_dir=data_dir, tracer=tracer, zrange=zrange, weight=weight_type, region=region)
+    pk = lsstypes.read(fn)
+    logger.info(f'Reading the data with {weight_type=} from {fn}')
+    window = lsstypes.read(fn)
 
     # Read the window matrix:
     tracer_window = kwargs.get('tracer_window', tracer)
-    logger.info(f'Reading the window with {tracer_window=}, {weight_type=},{window_extra=}')
-    window = lsstypes.read(get_stats_fn(kind='window_mesh2_spectrum', stats_dir=data_dir, tracer=tracer_window, zrange=zrange, weight=weight_type, region=region, extra=window_extra))
+    fn = get_stats_fn(kind='window_mesh2_spectrum', stats_dir=data_dir, tracer=tracer_window, zrange=zrange, weight=weight_type, region=region, extra=window_extra)
+    logger.info(f'Reading the window with {tracer_window=}, {weight_type=},{window_extra=} from {fn}')
+    window = lsstypes.read(fn)
 
     # Domitille FM window computation add an artificat on the region k (input space) > k_Nyquist (observable space) that bias the convolved theory at large scales.. (see validation_window.ipynb).
     # This k > k_Nyquist in the input space is irrelevant. Just remove it ! Here we keep only k < 0.1.
@@ -30,7 +35,8 @@ def read_data(data_dir='.', mocks_dir=None,
     # Read the analytical covariance matrix:
     try: 
         tracer_cov = kwargs.get('tracer_cov', tracer)
-        cov = lsstypes.read(get_stats_fn(kind='covariance_mesh2_spectrum', stats_dir=data_dir, tracer=tracer_cov, zrange=zrange, weight=weight_type, region=region))
+        fn = get_stats_fn(kind='covariance_mesh2_spectrum', stats_dir=data_dir, tracer=tracer_cov, zrange=zrange, weight=weight_type, region=region)
+        cov = lsstypes.read(fn)
     except:
         logger.info('Do not find the analytical covariance matrix. Please provide mocks_dir to estimate the covariance matrix from mocks.')
         cov = None
@@ -124,9 +130,11 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
     likelihood
         Same likelihood object, updated in place.
     """
+    from desilike import get_params
+    all_params = get_params(likelihood)
 
-    def _rescale_bias_params(likelihood, tracer, zeff):
-        """
+    def _rescale_bias_params(tracer, zeff):
+        """ 
         Fix the bias parameters in the likelihood according to the redshift dependence of the bias.
         Only modifies the parameter if both source and target exist in the likelihood.
 
@@ -140,7 +148,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
         target_param_name = f"{tracer[1]}.b1"
 
         # Both parameters must exist to create a derived relationship
-        if source_param_name not in likelihood.all_params or target_param_name not in likelihood.all_params:
+        if source_param_name not in all_params or target_param_name not in all_params:
             logger.debug(f"Skipping derived relationship: {source_param_name} -> {target_param_name} (missing parameter)")
             return
 
@@ -151,7 +159,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
         else:
             alpha, beta = tools.bias(1, tracer=tt, return_params=True)
         factor = (alpha * (1 + zeff[1])**2 + beta) / (alpha * (1 + zeff[0])**2 + beta)
-        likelihood.all_params[target_param_name].update(derived='{' + source_param_name + '}' + f' * {factor}')
+        all_params[target_param_name].update(derived=f'b1 * {factor}', depends={'b1': all_params[source_param_name]}, prior=None)
         logger.debug(f"Derived relationship: {target_param_name} = {source_param_name} * {factor}")
 
     tracers = tracer.split('x')
@@ -160,10 +168,10 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
     if tracers[0] == tracers[1]:
         if len(zeffs[tracer]) > 1:
             zeff = [zeffs[tracer][ell] for ell in [0, 2]]
-            _rescale_bias_params(likelihood, tracer=[f"{tracers[0]}_ell0", f"{tracers[0]}_ell2"], zeff=zeff)
+            _rescale_bias_params(tracer=[f"{tracers[0]}_ell0", f"{tracers[0]}_ell2"], zeff=zeff)
             # logger.warning('we neglect the redshift dependence of the damping term, for now') 
-            param_name_ell0, param_name_ell2 = f"{tracers[0]}_ell0.sigmas",f"{tracers[0]}_ell2.sigmas"
-            likelihood.all_params[param_name_ell2].update(derived='{' + param_name_ell0 + '}')
+            param_name_ell0, param_name_ell2 = f"{tracers[0]}_ell0.sigmas", f"{tracers[0]}_ell2.sigmas"
+            all_params[param_name_ell2].update(derived='sigmas', depends={'sigmas': all_params[param_name_ell0]}, prior=None)
             logger.debug(f"Derived damping: {param_name_ell2} = {param_name_ell0}")
 
     # Cross-correlation: 
@@ -178,7 +186,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
                 if 'x'.join([tt, tt]) in available_tracers:
                     # derived the bias from the auto-correlation bias, taking into account the different effective redshifts of the auto and cross correlation.
                     zeff = [zeffs['x'.join([tt, tt])][0], zeffs[tracer][0]]
-                    _rescale_bias_params(likelihood, tracer=[f"{tt}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
+                    _rescale_bias_params(tracer=[f"{tt}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
                 else:
                     # determine default tracer to link the bias parameters, if auto-correlation data is not available.
                     default_tracer = sorted([tracer for tracer in available_tracers if tt in tracer.split('x')])[0]
@@ -187,14 +195,14 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
                     else:
                         logger.debug(f'This parameter is free ({tt}, {tracer}), but it will be linked to {default_tracer} bias parameters to break degeneracy, since auto-tracer data for {tt} is not available.')
                         zeff = [zeffs[default_tracer][0], zeffs[tracer][0]]
-                        _rescale_bias_params(likelihood, tracer=[f"{tt}_{default_tracer}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
+                        _rescale_bias_params(tracer=[f"{tt}_{default_tracer}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
 
             else:
                 # let free the cross-correlation bias, but fix one of the two biases to break degeneracy.
                 # the first linear bias parameter can be set with kwargs.          
                 if i == 0:      
                     default_b1 = kwargs.get(f"{tt}{cross_suffix}_ell0.b1", 1)
-                    likelihood.all_params[f"{tt}{cross_suffix}_ell0.b1"].update(value=default_b1, fixed=True) 
+                    all_params[f"{tt}{cross_suffix}_ell0.b1"].update(value=default_b1, fixed=True) 
     
             if len(zeffs[tracer]) > 1:
                 zeff = [zeffs[tracer][ell] for ell in [0, 2]]
@@ -202,7 +210,8 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
                 try:
                     # logger.warning('we neglect the redshift dependence of the damping term, for now')
                     # Note: the first damping term is fixed to 0 so only need to update the second one.
-                    if i == 1: likelihood.all_params[f"{tt}{cross_suffix}_ell2.sigmas"].update(derived='{' + f"{tt}{cross_suffix}_ell0.sigmas" + '}')
+                    # prior=None to not double-count priors
+                    if i == 1: all_params[f"{tt}{cross_suffix}_ell2.sigmas"].update(derived='sigmas', depends={'sigmas': all_params[f"{tt}{cross_suffix}_ell0.sigmas"]}, prior=None)
                 except KeyError as e:
                     # It can happen now when removing the quadrupole from the cross-correlation in the join fit.
                     # (i could update zeff but okay just add more flexibility here)
@@ -232,62 +241,141 @@ def _get_png_cross_two_redshift_cls():
     if _PNG_CROSS_TWO_REDSHIFT_CLS is not None:
         return _PNG_CROSS_TWO_REDSHIFT_CLS
 
-    from desilike.jax import interp1d
-    from desilike.jax import numpy as jnp
-    from desilike.theories.galaxy_clustering import PNGTracerPowerSpectrumMultipoles
+    import jax.numpy as jnp
+    from desilike.parameter import VariableCollection
+    from desilike.theories.galaxy_clustering.png import (
+        PNGTracerSpectrum2Poles, FixedSpectrum2Template, _alpha_png, _delta_c, _interp_loglog
+    )
+    from desilike.theories.galaxy_clustering.power_template import ProjectToPoles
 
-    class PNGTracerCrossTwoRedshift(PNGTracerPowerSpectrumMultipoles):
+    class PNGTracerCrossTwoRedshift(PNGTracerSpectrum2Poles):
         """Local-PNG cross power spectrum of two tracers at two different snapshot redshifts."""
+    
+        def __init__(self, k=None, ells=(0, 2), method='prim', mu=10, mode='b-p',
+                     tracers=None, nbar=1e-4, params=None, templates=None):
+            if mode not in ('b-p', 'bphi', 'bfnl'):
+                raise ValueError(f"mode must be one of 'b-p', 'bphi', 'bfnl'; got {mode!r}")
+        
+            if templates is None or len(templates) != 2:
+                raise ValueError('PNGTracerCrossTwoRedshift requires exactly two templates.')
+        
+            vc = type(self).propose_params(tracers=tracers, mode=mode)
+            if params is not None:
+                vc = vc + VariableCollection(params)
+            assign_params(self, vc, tracers)
+        
+            self.templates = list(templates)
+        
+            k_arr = np.linspace(0.01, 0.2, 101) if k is None else np.asarray(k, dtype='f8')
+            kin_fine = np.geomspace(min(1e-4, k_arr[0] / 2.), max(1., k_arr[-1] * 2.), 1000)
+        
+            for template in self.templates:
+                template.update(k=kin_fine)
+    
+        def __post_init__(self, k=None, ells=(0, 2), method='prim', mu=10, mode='b-p',
+                          tracers=None, nbar=1e-4, params=None, templates=None):
+            if k is None:
+                k = np.linspace(0.01, 0.2, 101)
+        
+            self.k = np.asarray(k, dtype='f8')
+            self.ells = tuple(ells)
+            self._mode = str(mode)
+            self._method = str(method)
+            self._z = [float(template.z) for template in self.templates]
+            self._nbar = float(nbar)
+            self._to_poles = ProjectToPoles(mu=mu, ells=self.ells)
+        
+            for template in self.templates:
+                reqs = {'primordial.pk': [{'k': template.k}]}
+                if self._method == 'transfer':
+                    reqs.update({
+                        'background.growth_factor': [{'z': template.z}, {'z': 10.}],
+                        'params.Omega_m': None,
+                    })
+                template.cosmo.add_requirements(reqs)
+                template.cosmo()
 
-        # Inherit desilike's png.yaml: pointing config_fn at the BASE class (not the string
-        # 'png.yaml') triggers desilike's config-inheritance path, so the yaml is resolved relative
-        # to desilike's module instead of this file's directory (see desilike/base.py __new__).
-        config_fn = PNGTracerPowerSpectrumMultipoles
-
-        def initialize(self, *args, z_y=None, **kwargs):
-            super().initialize(*args, **kwargs)
-            # z_x is the primary template redshift (first tracer); z_y is the second tracer's.
-            self.z_y = float(self.template.z if z_y is None else z_y)
-
-        def calculate(self, **params):
-            # mirrors desilike png.py PNGTracerPowerSpectrumMultipoles.calculate, but evaluates the
-            # first tracer at z_x (= self.template.z) and the second at z_y.
-            params = self.decode_params(params, defaults=dict(b1=1., sigmas=0., sn0=0., bphi=1., p=1., bfnl_loc=0.))
-            (b1X, b1Y), (sigmasX, sigmasY), sn0 = [params[name] for name in ['b1', 'sigmas', 'sn0']]
-            jac, kap, muap = self.template.ap_k_mu(self.k, self.mu)
-            kin, cosmo, pk_dd = self.template.k, self.template.cosmo, self.template.pk_dd  # pk_dd at z_x
-            zy = self.z_y
-            # Second tracer's f(z_y) and pk_dd(z_y) computed with the SAME convention the template uses
-            # for its own f and pk_dd (power_template.py BasePowerSpectrumExtractor._calculate):
-            #   f = sigma8(theta_cb) / sigma8(delta_cb);  pk_dd from the delta_cb pk_interpolator,
-            # just evaluated at z_y instead of z_x. (cosmo.growth_rate is not exposed for CambEngine.)
-            fo = cosmo.get_fourier()
-            fX = self.template.f                                                     # f(z_x)
-            fY = fo.sigma8_z(zy, of='theta_cb') / fo.sigma8_z(zy, of='delta_cb')      # f(z_y)
-            pk_dd_y = fo.pk_interpolator(of='delta_cb', extrap_kmin=1e-7, extrap_kmax=1e2).to_1d(z=zy)(kin)
-            pk_dd_cross = (pk_dd * pk_dd_y)**0.5            # geometric mean = D(z_x) D(z_y) P(k, 0)
-            # alpha(k, z) with the 'prim' normalization (as in png.py), per tracer redshift.
-            pk_prim = cosmo.get_primordial(mode='scalar').pk_interpolator()(kin)
-            pphi_prim = 9 / 25 * 2 * jnp.pi**2 / kin**3 * pk_prim / cosmo.h**3
-            alphaX = 1. / (pk_dd / pphi_prim)**0.5
-            alphaY = 1. / (pk_dd_y / pphi_prim)**0.5
-            kin, alphaX, alphaY, pk_dd_cross = kin[1:], alphaX[1:], alphaY[1:], pk_dd_cross[1:]  # drop norm-k
-            alphaX = interp1d(jnp.log10(kap), jnp.log10(kin), alphaX)
-            alphaY = interp1d(jnp.log10(kap), jnp.log10(kin), alphaY)
-            fnl_loc = params['fnl_loc']
-            pX, pY = params['p']
-            bX = b1X + 2. * 1.686 * (b1X - pX) * fnl_loc * alphaX
-            bY = b1Y + 2. * 1.686 * (b1Y - pY) * fnl_loc * alphaY
-            fog = 1. / ((1. + sigmasX**2 * kap**2 * muap**2 / 2.) * (1. + sigmasY**2 * kap**2 * muap**2 / 2.))
-            pkmu = jac * fog * (bX + fX * muap**2) * (bY + fY * muap**2) * interp1d(jnp.log10(kap), jnp.log10(kin), pk_dd_cross) + sn0 / self.nbar
-            self.power = self.to_poles(pkmu)
+        def __call__(self):
+            if not isinstance(self.b1, tuple):
+                raise ValueError('PNGTracerCrossTwoRedshift requires two tracers.')
+        
+            templates = self.templates
+            if len(templates) != 2:
+                raise ValueError('PNGTracerCrossTwoRedshift requires exactly two templates.')
+        
+            k = self.k[:, None]
+            mu = self._to_poles.mu
+        
+            jac_x, kap_x, muap_x = templates[0].ap_k_mu(k, mu)
+            jac_y, kap_y, muap_y = templates[1].ap_k_mu(k, mu)
+        
+            pk_dd_x = jac_x * _interp_loglog(kap_x, templates[0].k, templates[0].pk_dd)
+            pk_dd_y = jac_y * _interp_loglog(kap_y, templates[1].k, templates[1].pk_dd)
+            pk_dd = jnp.sqrt(pk_dd_x * pk_dd_y)
+        
+            pk_prim_x = templates[0].cosmo.get('primordial.pk', k=templates[0].k)
+            pk_prim_y = templates[1].cosmo.get('primordial.pk', k=templates[1].k)
+        
+            h_x = templates[0].cosmo['h']
+            h_y = templates[1].cosmo['h']
+        
+            if self._method == 'transfer':
+                Omega_m_x = templates[0].cosmo.get('params.Omega_m')
+                Omega_m_y = templates[1].cosmo.get('params.Omega_m')
+                growth_x = templates[0].cosmo.get('background.growth_factor', z=self._z[0])
+                growth_y = templates[1].cosmo.get('background.growth_factor', z=self._z[1])
+                growth_norm_x = templates[0].cosmo.get('background.growth_factor', z=10.)
+                growth_norm_y = templates[1].cosmo.get('background.growth_factor', z=10.)
+            else:
+                Omega_m_x = Omega_m_y = None
+                growth_x = growth_y = None
+                growth_norm_x = growth_norm_y = None
+        
+            alpha_fine_x = _alpha_png(templates[0].k, templates[0].pk_dd, pk_prim_x, h_x, self._method,
+                                      Omega0_m=Omega_m_x, growth_factor_z=growth_x,
+                                      growth_factor_znorm=growth_norm_x)
+            alpha_fine_y = _alpha_png(templates[1].k, templates[1].pk_dd, pk_prim_y, h_y, self._method,
+                                      Omega0_m=Omega_m_y, growth_factor_z=growth_y,
+                                      growth_factor_znorm=growth_norm_y)
+        
+            alpha_x = _interp_loglog(kap_x, templates[0].k, alpha_fine_x)
+            alpha_y = _interp_loglog(kap_y, templates[1].k, alpha_fine_y)
+        
+            b1_x, b1_y = self.b1
+            sigmas_x, sigmas_y = self.sigmas
+        
+            if self._mode == 'b-p':
+                p_x, p_y = self.p
+                bfnl_loc_x = 2. * _delta_c * (b1_x - p_x) * self.fnl_loc
+                bfnl_loc_y = 2. * _delta_c * (b1_y - p_y) * self.fnl_loc
+            elif self._mode == 'bphi':
+                bphi_x, bphi_y = self.bphi
+                bfnl_loc_x = bphi_x * self.fnl_loc
+                bfnl_loc_y = bphi_y * self.fnl_loc
+            else:
+                bfnl_loc_x, bfnl_loc_y = self.bfnl_loc
+        
+            b_eff_x = b1_x + bfnl_loc_x * alpha_x
+            b_eff_y = b1_y + bfnl_loc_y * alpha_y
+        
+            f_x = templates[0].f
+            f_y = templates[1].f
+        
+            fog_x = 1. / (1. + sigmas_x**2 * kap_x**2 * muap_x**2 / 2.)
+            fog_y = 1. / (1. + sigmas_y**2 * kap_y**2 * muap_y**2 / 2.)
+        
+            pkmu = fog_x * fog_y * (b_eff_x + f_x * muap_x**2) * (b_eff_y + f_y * muap_y**2) * pk_dd
+        
+            sn = jnp.array([(ell == 0) for ell in self.ells], dtype='f8')[:, None] * self.sn0 / self._nbar
+            self.poles = self._to_poles(pkmu) + sn
+            return self.poles
 
     _PNG_CROSS_TWO_REDSHIFT_CLS = PNGTracerCrossTwoRedshift
     return _PNG_CROSS_TWO_REDSHIFT_CLS
 
 
 def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG': {0: 0.7, 2: 0.7}}, p={'LRG': 1., 'ELG': 1., 'QSO': 1.4},
-                                  fix_fnl=False, engine='class', scale_covariance=1, nickname=None, bias_params=None, pk_zeff=None, **kwargs):
+                                  fix_fnl=False, engine='camb', scale_covariance=1, nickname=None, bias_params=None, pk_zeff=None, **kwargs):
     """
     Get the observable and likelihood for a given tracer. Each multipole is treated as a different observable, but they share the same parameters in the theory.
 
@@ -305,7 +393,7 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
             With nickname='LRGxELG', ELG parameters become 'ELG_LRGxELG_ell0.b1'. Default is None.
         
         pk_zeff (float or dict, optional): Redshift at which the power-spectrum template is evaluated
-            (FixedPowerSpectrumTemplate). Use this to evaluate P(k) at a fixed redshift instead of the
+            (FixedSpectrum2Template). Use this to evaluate P(k) at a fixed redshift instead of the
             per-multipole OQE effective redshift carried by `zeffs`. Either a scalar (applied to every
             tracer and multipole), or a dict keyed by the tracer pair ('LRGxLRG', 'LRGxQSO', ...) or by
             the 3-letter auto tracer ('LRG', 'QSO'). Keys that are absent fall back to `zeffs`. If None
@@ -320,9 +408,10 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
        observables: list of monopole and quadrupole (if used) desilike observables.
        likelihood: desilike likelihood to run profer or MCMC on.
     """
-    from desilike.theories.galaxy_clustering import FixedPowerSpectrumTemplate, PNGTracerPowerSpectrumMultipoles
-    from desilike.observables.galaxy_clustering import TracerPowerSpectrumMultipolesObservable
+    from desilike.theories.galaxy_clustering import FixedSpectrum2Template, PNGTracerSpectrum2Poles
+    from desilike.observables.galaxy_clustering import Spectrum2PolesObservable
     from desilike.likelihoods import ObservablesGaussianLikelihood
+    from desilike import get_params
     from cosmoprimo.fiducial import DESI
 
     tracers = tuple(tracer.split('x'))
@@ -381,30 +470,31 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
         if two_z is not None:
             # cross with the two tracers at two different snapshot redshifts (z_x for tracers[0],
             # z_y for tracers[1]); single Lorentzian enforced below by fixing the first sigmas to 0.
-            template = FixedPowerSpectrumTemplate(z=two_z[0], fiducial=DESI(engine=engine))
-            theory = _get_png_cross_two_redshift_cls()(template=template, z_y=two_z[1], mode="b-p", tracers=tracers_theo)
+            templates = [FixedSpectrum2Template(fiducial=DESI(), engine=engine, z=zz) for zz in two_z]
+            theory = _get_png_cross_two_redshift_cls()(templates=templates, mode="b-p", tracers=tracers_theo)
         else:
-            template = FixedPowerSpectrumTemplate(z=_template_z(ell), fiducial=DESI(engine=engine))
-            theory = PNGTracerPowerSpectrumMultipoles(template=template, mode="b-p", tracers=tracers_theo)
+            template = FixedSpectrum2Template(fiducial=DESI(), engine=engine, z=_template_z(ell))
+            theory = PNGTracerSpectrum2Poles(template=template, mode="b-p", tracers=tracers_theo)
         # Fix some parameters:
-        theory.params['fnl_loc'].update(value=0.0, fixed=fix_fnl)
+        params = get_params(theory)
+        params['fnl_loc'].update(value=0.0, fixed=fix_fnl)
         if ell == 2: 
-            theory.params[f"{'x'.join(tracers_theo)}.sn0"].update(value=0, fixed=True)
+            params[f"{'x'.join(tracers_theo)}.sn0"].update(value=0, fixed=True)
         for tracer in tracers_theo:
-            theory.params[f'{tracer}.p'].update(value=p[tracer.split('_')[0]], fixed=True)
+            params[f'{tracer}.p'].update(value=p[tracer.split('_')[0]], fixed=True)
         # Use only one damping term for the cross-correlation
         if cross_correlation: 
-            theory.params[f"{tracers_theo[0]}.sigmas"].update(value=0, fixed=True)
-
+            params[f"{tracers_theo[0]}.sigmas"].update(value=0, fixed=True)
+        theory.update(params=params)
         # Don't forget to give different name for the observable in order to stack them together in the likelihood:
-        name = 'pk_' + 'x'.join(tracers) + f'_ell{ell}'
-        observables += [TracerPowerSpectrumMultipolesObservable(name=name, data=data, window=wmatrix, theory=theory)] 
+        name = f"pk_{'x'.join(tracers)}_ell{ell}"
+        observables += [Spectrum2PolesObservable(name=name, data=data, window=wmatrix, theory=theory)] 
 
     if isinstance(cov, list):
         import lsstypes
         logger.info('Using mocks to estimate the covariance matrix.')
         covariance = lsstypes.cov([mock.match(pk) for mock in cov]).value()
-        correction_covariance = {'correction': 'hartlap-percival2014', 'nobs': len(cov)}
+        correction_covariance = {'correction': 'hartlap2007+percival2014', 'nobs': len(cov)}
     else:
         logger.info('Using analytical covariance matrix.')
         covariance = cov.at.observable.get(tracers=tracers).value()
@@ -413,7 +503,6 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
     likelihood = ObservablesGaussianLikelihood(observables=observables, covariance=covariance, 
                                                correct_covariance=correction_covariance, scale_covariance=scale_covariance)
     fix_likelihood_bias_and_damping(likelihood, tracer='x'.join(tracers), zeffs=zeffs, derived_cross_bias=False, nickname=nickname, bias_params=bias_params, **kwargs)
-    likelihood()
 
     return observables, likelihood
 
@@ -554,66 +643,71 @@ def build_total_likelihood(order, pks, observables, covs, zeffs, fiducial, scale
     if isinstance(covs[order[0]], list):
         logger.info('Using mocks to estimate the covariance matrix.')
         covariance = np.cov(np.transpose([np.concatenate([covs[tt][i].match(pks[tt]).value() for tt in order]) for i in range(len(covs[order[0]]))]))
-        correction_covariance = {'correction': 'hartlap-percival2014', 'nobs': len(covs[order[0]])}
+        correction_covariance = {'correction': 'hartlap2007+percival2014', 'nobs': len(covs[order[0]])}
     else:
         logger.info('Using analytical covariance matrix.')
         covariance = combine_analytical_covariances(pks, covs, order=order, fiducial=fiducial).value()
         correction_covariance = None
     
     total_likelihood = ObservablesGaussianLikelihood(observables=total_observables, covariance=covariance, 
-                                                     correct_covariance=correction_covariance,scale_covariance=scale_covariance)
+                                                     correct_covariance=correction_covariance, scale_covariance=scale_covariance)
     for tracer in order: 
         # We do not link the damping term from the cross-correlation and the auto-correlation
         # Because they are different effective redshifts and we do not know the a priori.
         fix_likelihood_bias_and_damping(total_likelihood, tracer=tracer, zeffs=zeffs, derived_cross_bias=True, nickname=tracer, available_tracers=order, bias_params=bias_params)
-    total_likelihood()
 
     return total_likelihood
 
 
-def run_profiler(likelihood, fn_output=None, sigfigs=2):
+def run_profiler(likelihood, fn_output=None):
     """ 
-    Run the iminuit profiler on the likelihood, the results are saved in a text file if output_name is provided. fn_output should be a .txt file. 
+    Run the iminuit profiler on the likelihood, the results are saved in a text file if output_name is provided. fn_output should be a .h5 file. 
     """
-    from desilike.profilers import MinuitProfiler
+    from desilike import Posterior, compile
+    from desilike.profilers import Profiler, Minuit
 
-    profiler = MinuitProfiler(likelihood, seed=7)
-    profiler.maximize(niterations=10)
+    posterior = compile(Posterior(likelihood=likelihood))
+    profiler = Profiler(posterior, kernel=Minuit(), rng=7)
+    profiles = profiler.maximize(niterations=10)
     logger.info(f'\n{profiler.profiles.to_stats(tablefmt="pretty")}')
+    best = profiler.profiles.choice(index='argmax', squeeze=True).select(input=True).best
+    # To set internal arrays
+    compile(likelihood)(best)
 
     if fn_output is not None:
-        to_save = profiler.profiles.to_stats(tablefmt='list', sigfigs=sigfigs, params=profiler.profiles.choice().bestfit.params())[0]
-        np.save(fn_output, to_save)
-
-        # for latex table:
-        #_ = profiler.profiles.to_stats(fn=fn_output)
-        #np.savetxt(fn_output.replace('.txt', '_list.txt'), profiler.profiles.to_stats(tablefmt='list')[0], fmt='%s')
-
+        profiles.write(fn_output)
     return profiler
 
 
-def run_mcmc(likelihood, fn_output='tmp/mcmc_output_*.npy', extend_chains=False, nchains=1, max_iterations=20000, check_every=5000):
-    """Run the MCMC sampler on the likelihood, the results are saved in a text file if fn_output is provided. 
+def run_mcmc(likelihood, dir_output='tmp/', resume=False, nchains=1, max_steps=20000, check_every=1000):
+    """Run the MCMC sampler on the likelihood, the results are saved as hdf5. 
 
     Args:
         likelihood: Desilike Likelihood object to run the MCMC on.
-        fn_output (str, optional): Where the chains will be saved (need to have *). Defaults to 'tmp/mcmc_output_*.npy'.
-        extend_chains (bool, optional): If True, it will extend the existing chains (saved in fn_output) by running new iterations. Defaults to False.
+        dir_output (str, optional): Where the chains will be saved. Defaults to 'tmp/samples_*.h5'.
+        resume (bool, optional): If True, it will extend the existing chains (saved in dir_output) by running new iterations. Defaults to False.
         nchains (int, optional): Number of chains to run. Defaults to 1.
-        max_iterations (int, optional): Maximum number of iterations to run. Defaults to 1e5.
+        max_steps (int, optional): Maximum number of steps to run. Defaults to 1e5.
         check_every (int, optional): How often to check the convergence + save the current state of the chains. Defaults to 1000.
 
     """
-    from desilike.samplers import EmceeSampler
-    chains = [fn_output.replace('*', f'{i}') for i in range(nchains)] if extend_chains else nchains
+    from desilike.distributed import get_mpicomm
+    from desilike import Posterior, compile
+    from desilike.samplers import Sampler, Emcee
 
-    sampler = EmceeSampler(likelihood, seed=31, chains=chains, save_fn=fn_output)  
-    sampler.run(max_iterations=max_iterations, check_every=check_every, progress=True)
+    posterior = compile(Posterior(likelihood=likelihood))
+    mpicomm = get_mpicomm()
+    if not resume and mpicomm.rank == 0:  # just remove directory
+         for path in Path(dir_output).glob('*'):
+            if path.name != 'profiles.h5':
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+    sampler = Sampler(posterior, kernel=Emcee(), rng=31, output_dir=dir_output, nparallel=nchains)  
+    sampler.run(max_steps=max_steps, check_every=check_every, save_every=check_every)
 
     return sampler
 
 
-def plot_observables(observables, figsize=(6, 4),ylims=None, show=True, fn_output=None):
+def plot_observables(observables, figsize=(6, 4), ylims=None, show=True, fn_output=None):
     """ 
     Plot the observables (power spectrum multipoles) with their theory predictions and residuals.
 
@@ -760,16 +854,18 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
         Base directory. Profile outputs are written under the corresponding profiles directory.
     """
     import os
+    from desilike import compile
 
     # from clustering_statistics.tools import bias
     # tt1 = short_tracer.split('x')[0]
     # kwargs = {f'{tt1}_{short_tracer}_ell0.b1': bias(zeffs[region][short_tracer][0], tracer=tt1)}
     kwargs = {'LRG_LRGxQSO_ell0.b1': 2.25, 'LRG_LRGxELG_ell0.b1': 2.24, 'ELG_ELGxQSO_ell0.b1': 1.42, 'scale_covariance': 1}
 
-    fn_profile = base_dir + f"mock{imock}/bestfit_{tracer}_{region}_{'analytical_cov' if analytical_covariance else 'mock_cov'}_kmin-{kmin}{extra_fn}.npy"
-    if (os.path.isfile(fn_profile) and force_profiling) or (not os.path.isfile(fn_profile)):
-        os.makedirs(os.path.dirname(fn_profile), exist_ok=True)
-        
+    fn_profile = Path(base_dir) /  f"mock{imock}/bestfit_{tracer}_{region}_{'analytical_cov' if analytical_covariance else 'mock_cov'}_kmin-{kmin}{extra_fn}.h5"
+    exists = fn_profile.is_file()
+    if force_profiling or not exists:
+        fn_profile.parent.mkdir(parents=True, exist_ok=True)
+
         tracers = tracer.split('-')
 
         obs, lik, zeffs = {}, {}, {}
@@ -796,18 +892,18 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
                 mocks_cov[tt] = [mm.match(pks[tt]) for mm in mocks_cov[tt]]
                 covariance = mocks_cov[tt]
 
-            obs[tt], lik[tt] = get_observable_and_likelihood(pks[tt], window, covariance, tt, zeffs, engine='camb', fix_fnl=False, nickname=tt, **kwargs)
+            obs[tt], lik[tt] = get_observable_and_likelihood(pks[tt], window, covariance, tt, zeffs, fix_fnl=False, nickname=tt, **kwargs)
 
         if len(tracers) > 1:
             lik = build_total_likelihood(tracers, pks, obs, covs if analytical_covariance else mocks_cov, zeffs, fiducial)
         else:
             obs, lik = obs[tracers[0]], lik[tracers[0]]
 
-        profiler = run_profiler(lik, fn_output=fn_profile, sigfigs=5)
+        profiler = run_profiler(lik, fn_output=fn_profile)
 
         if save_plot:
             ylims = [(2e3, 4e4), (2e3, 4e4)] if tracer in ['ELGxELG', 'ELGxQSO'] else None
-            fn_obs = base_dir + f"mock{imock}/bestfit_{tracer}_{'' if analytical_covariance else 'mock'}_kmin-{kmin}{extra_fn}.png"
+            fn_obs = base_dir / f"mock{imock}/bestfit_{tracer}_{'' if analytical_covariance else 'mock'}_kmin-{kmin}{extra_fn}.png"
             if len(tracers) > 1:
                 plot_observables({tt: obs[tt] for tt in tracers}, ylims=ylims, fn_output=fn_obs, show=True)
             else: 

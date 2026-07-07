@@ -4,6 +4,11 @@ Density-field reconstruction utilities.
 Main functions
 --------------
 * `compute_reconstruction`: Run reconstruction for cutsky geometry.
+* `compute_rsd_realspace_positions`: Run JAX cutsky reconstruction and return
+  the RSD-only shifted data positions needed by catalog-level RSD blinding.
+* `compute_pyrecon_rsd_realspace_positions`: Run direct pyrecon cutsky
+  reconstruction and return the same RSD-only shifted data positions without
+  importing LSS wrappers.
 * `compute_box_reconstruction`: Run reconstruction for periodix boxes.
 """
 
@@ -18,7 +23,7 @@ from .spectrum2_tools import prepare_jaxpower_particles
 logger = logging.getLogger('reconstruction')
 
 
-def compute_reconstruction(get_data_randoms, mattrs=None, mode='recsym', bias=2.0, smoothing_radius=15.):
+def compute_reconstruction(get_data_randoms, mattrs=None, mode='recsym', bias=2.0, smoothing_radius=15., growth_rate=None, threshold_randoms=0.01):
     """
     Compute density field reconstruction using :mod:`jaxrecon`.
 
@@ -30,19 +35,31 @@ def compute_reconstruction(get_data_randoms, mattrs=None, mode='recsym', bias=2.
     mattrs : dict, optional
         Mesh attributes to define the :class:`jaxpower.ParticleField` objects,
         'boxsize', 'meshsize' or 'cellsize', 'boxcenter'. If ``None``, default attributes are used.
-    mode : {'recsym', 'reciso'}, optional
-        Reconstruction mode. 'recsym' removes large-scale RSD from randoms, 'reciso' does not.
+    mode : {'recsym', 'reciso', 'rsd'}, optional
+        Reconstruction mode. 'recsym' removes large-scale RSD from randoms,
+        'reciso' does not, and 'rsd' returns the RSD-only shifted data positions
+        used as the reconstructed-realspace catalog for catalog-level RSD
+        blinding. In 'rsd' mode randoms are used to build the density field but
+        shifted random positions are not returned.
     bias : float, optional
         Linear bias of the tracer.
     smoothing_radius : float, optional
         Smoothing radius in Mpc/h for the density field.
+    growth_rate : float or None, optional
+        Growth rate used by reconstruction. If ``None``, use the existing
+        desi-clustering convention: estimate an effective DESI growth rate on
+        the FKP grid. For catalog-level RSD validation/use, pass the same
+        constant fiducial growth rate used by the RSD redshift transform.
+    threshold_randoms : float or tuple, optional
+        Random-density threshold passed to :func:`jaxrecon.zeldovich.estimate_particle_delta`.
+        Use ``('mean', 0.01)`` to match pyrecon's scalar-threshold convention.
 
     Returns
     -------
     data_positions_rec : np.ndarray
         Reconstructed data positions.
-    randoms_positions_rec : np.ndarray
-        Reconstructed randoms positions.
+    randoms_positions_rec : np.ndarray or None
+        Reconstructed randoms positions. This is ``None`` for ``mode='rsd'``.
     """
     # Import reconstruction and density estimation tools from jaxrecon
     from jaxpower import create_sharding_mesh, FKPField
@@ -62,14 +79,15 @@ def compute_reconstruction(get_data_randoms, mattrs=None, mode='recsym', bias=2.
 
         # Estimate overdensity field by smoothing FKP field with Gaussian kernel
         # This provides the initial density perturbation for reconstruction
-        delta = estimate_particle_delta(fkp, smoothing_radius=smoothing_radius)
+        delta = estimate_particle_delta(fkp, smoothing_radius=smoothing_radius, threshold_randoms=threshold_randoms)
 
-        # Load fiducial cosmology to compute growth rate
-        # Growth rate f(z) = d ln D / d ln a is needed for Zeldovich reconstruction
-        from cosmoprimo.fiducial import DESI
-        cosmo = DESI()
-        # Compute effective growth rate on the grid; order=1 is interpolation order
-        growth_rate = compute_fkp_effective_redshift(fkp.data, order=1, cellsize=None, func_of_z=cosmo.growth_rate)
+        if growth_rate is None:
+            # Load fiducial cosmology to compute growth rate.
+            # Growth rate f(z) = d ln D / d ln a is needed for Zeldovich reconstruction.
+            from cosmoprimo.fiducial import DESI
+            cosmo = DESI()
+            # Compute effective growth rate on the grid; order=1 is interpolation order.
+            growth_rate = compute_fkp_effective_redshift(fkp.data, order=1, cellsize=None, func_of_z=cosmo.growth_rate)
 
         # Run iterative FFT-based Zeldovich reconstruction
         # JIT-compile for performance; static args don't change across calls; donate_argnums for memory efficiency
@@ -81,33 +99,95 @@ def compute_reconstruction(get_data_randoms, mattrs=None, mode='recsym', bias=2.
             halo_add=0                # Halo size in cells for distributed computation (0 = no halos needed)
         )
 
-        # Extract reconstructed positions for data particles
-        # Applies Zeldovich displacement field to move particles back to initial positions
-        data_positions_rec = recon.read_shifted_positions(fkp.data.positions)
+        # Validate reconstruction mode. For catalog-level RSD blinding we need
+        # the reconstructed-realspace data positions corresponding to the RSD
+        # contribution only, i.e. positions - psi_rsd.
+        assert mode in ['recsym', 'reciso', 'rsd']
+        data_kwargs = {}
+        if mode == 'rsd':
+            data_kwargs['field'] = 'rsd'
+        # Extract reconstructed positions for data particles.
+        data_positions_rec = recon.read_shifted_positions(fkp.data.positions, **data_kwargs)
 
-        # Validate reconstruction mode (recsym or reciso)
-        assert mode in ['recsym', 'reciso']
-        # RecSym mode: subtract RSD from randoms (use full displacement including RSD)
-        # RecIso mode: use only isotropic displacement (no RSD removal) for randoms
-        kwargs = {}
-        if mode == 'reciso':
-            # Use only isotropic displacement field (not including line-of-sight component)
-            kwargs['field'] = 'disp'
-
-        # Extract reconstructed positions for random particles
-        randoms_positions_rec = recon.read_shifted_positions(fkp.randoms.positions, **kwargs)
+        randoms_positions_rec = None
+        if mode != 'rsd':
+            # RecSym mode: subtract RSD from randoms (use full displacement including RSD).
+            # RecIso mode: use only isotropic displacement (no RSD removal) for randoms.
+            randoms_kwargs = {}
+            if mode == 'reciso':
+                randoms_kwargs['field'] = 'disp'
+            # Extract reconstructed positions for random particles.
+            randoms_positions_rec = recon.read_shifted_positions(fkp.randoms.positions, **randoms_kwargs)
         if jax.process_index() == 0:
             logger.info('Reconstruction finished.')
 
         # Reverse the MPI distribution to gather particles back to original process ranks
         # (data and randoms were distributed across processes for parallel reconstruction)
         data_positions_rec = fkp.data.exchange_inverse(data_positions_rec)
-        randoms_positions_rec = fkp.randoms.exchange_inverse(randoms_positions_rec)
+        if randoms_positions_rec is not None:
+            randoms_positions_rec = fkp.randoms.exchange_inverse(randoms_positions_rec)
         if jax.process_index() == 0:
             logger.info('Exchange finished.')
 
     return data_positions_rec, randoms_positions_rec
 
+
+
+def compute_rsd_realspace_positions(get_data_randoms, mattrs=None, bias=2.0, smoothing_radius=15., growth_rate=None, threshold_randoms=('mean', 0.01)):
+    """Return RSD-only reconstructed-realspace data positions using jaxrecon.
+
+    This is the JAX-native counterpart of the LSS ``convention='rsd'``
+    reconstruction output needed by :class:`desiblind.catalog_rsd.CatalogRSDBlinder`.
+    It uses randoms to build the density field but only returns data positions;
+    shifted randoms are not needed for the final RSD redshift transform.
+    """
+    data_positions_rec, _ = compute_reconstruction(
+        get_data_randoms, mattrs=mattrs, mode='rsd', bias=bias,
+        smoothing_radius=smoothing_radius, growth_rate=growth_rate,
+        threshold_randoms=threshold_randoms,
+    )
+    return data_positions_rec
+
+
+def compute_pyrecon_rsd_realspace_positions(data_positions, randoms_positions, data_weights=None, randoms_weights=None,
+                                            *, bias=2.0, growth_rate=0.8, boxsize=None, boxcenter=None, nmesh=None,
+                                            cellsize=7., smoothing_radius=15., threshold_randoms=0.01, nthreads=64,
+                                            dtype='f8', method='iterative_fft'):
+    """Return RSD-only reconstructed-realspace data positions using pyrecon directly.
+
+    This mirrors the core logic used by ``LSS.recon_tools.run_reconstruction``
+    for ``convention='rsd'`` but deliberately avoids importing LSS.  It is the
+    reference-compatible backend for catalog-level RSD blinding in
+    ``desi-clustering``; LSS remains a validation benchmark only.
+    """
+    import numpy as np
+    from pyrecon import IterativeFFTReconstruction, MultiGridReconstruction, setup_logging
+
+    setup_logging()
+    data_positions = np.asarray(data_positions, dtype=dtype)
+    randoms_positions = np.asarray(randoms_positions, dtype=dtype)
+    if data_weights is not None:
+        data_weights = np.asarray(data_weights, dtype=dtype)
+    if randoms_weights is not None:
+        randoms_weights = np.asarray(randoms_weights, dtype=dtype)
+
+    if method == 'iterative_fft':
+        Reconstruction = IterativeFFTReconstruction
+    elif method == 'multigrid':
+        Reconstruction = MultiGridReconstruction
+    else:
+        raise ValueError(f'Unknown pyrecon method {method!r}')
+
+    recon = Reconstruction(
+        f=growth_rate, bias=bias, boxsize=boxsize, boxcenter=boxcenter, nmesh=nmesh,
+        cellsize=cellsize, los='local', positions=data_positions, dtype=dtype,
+        fft_engine='fftw', nthreads=nthreads, threshold_randoms=threshold_randoms,
+    )
+    recon.assign_data(data_positions, data_weights)
+    recon.assign_randoms(randoms_positions, randoms_weights)
+    recon.set_density_contrast(smoothing_radius=smoothing_radius)
+    recon.run()
+    return recon.read_shifted_positions(data_positions, field='rsd')
 
 
 def compute_box_reconstruction(get_data, mattrs=None, mode='recsym', zsnap=None, bias=2.0, smoothing_radius=15., nran=10, los='z'):

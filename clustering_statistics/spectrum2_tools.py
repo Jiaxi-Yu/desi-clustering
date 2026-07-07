@@ -528,7 +528,7 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
         if optimal_weights is None:
             # Standard case: no optimal weights → compute all multipoles in one shot
             results = _compute_spectrum_ell(all_particles, ells=ells)
-        
+
         else:
             # Names of particle types, e.g. ['data', 'randoms', 'shifted']
             # Each catalog dict has these keys
@@ -540,7 +540,7 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
             # Pad particle inputs similarly for auto/cross compatibility.
             all_particles = tuple(all_particles)
             all_particles = all_particles + (all_particles[-1],) * max(0, len(fields) - len(all_particles))
-        
+
             def compute(ell):
                 # Collect results for this ell across all weight realizations
                 result_ell = {}
@@ -551,7 +551,7 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
                         optimal_weights,
                         columns_optimal_weights,
                     ) for name in names]
-        
+
                 # Zip the iterators → one "weight realization"
                 # weighted_by_name looks like:
                 #   [(data1, data2), (randoms1, randoms2), (shifted1, shifted2)]
@@ -561,27 +561,27 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
                     # Before: [(data1, data2), (randoms1, randoms2), (shifted1, shifted2)]
                     # After:  [(data1, randoms1, shifted1), (data2, randoms2, shifted2)]
                     weighted_by_catalog = list(zip(*weighted_by_name))
-        
+
                     # Convert tuples → dicts expected by _compute_spectrum_ell
                     weighted_by_catalog = [dict(zip(names, particles)) for particles in weighted_by_catalog]
-        
+
                     # Compute spectrum for this weight realization (single ell)
                     _result = _compute_spectrum_ell(weighted_by_catalog, ells=[ell], fields=fields)
-        
+
                     # Accumulate results (raw / cut / auw)
                     for key, value in _result.items():
                         result_ell.setdefault(key, [])
                         result_ell[key].append(value)
-        
+
                 # Combine all weight realizations for this ell (e.g. symmetric tracer permutations)
                 return {key: combine_stats(value) for key, value in result_ell.items()}
-        
+
             def join(results):
                 # Join results across multipoles: results[key] = [ell0, ell2, ell4, ...] → concatenate
                 for key in results:
                     results[key] = types.join(results[key])
                 return results
-        
+
             # Main driver: loops over ell and calls compute(...)
             results = loop_over_optimal_weights(ells, compute, join)
 
@@ -721,11 +721,11 @@ def compute_window_mesh2_spectrum(*get_data_randoms, spectrum: types.Mesh2Spectr
                 from cucount.jax import BinAttrs, count2_analytic
                 battrs = BinAttrs(s=sedges)
                 RR0 = count2_analytic(mattrs=1., battrs=battrs)
-    
+
                 # Divide by volume factor and normalization
                 def renormalize(pole):
                     return pole.clone(norm=np.mean(norm) * RR0)
-    
+
                 correlation = correlation.map(renormalize)
                 #correlation = correlation.clone(
                 #    num_shotnoise=compute_particle2_shotnoise(*all_particles, bin=pbin, fields=fields),
@@ -963,23 +963,23 @@ def compute_smooth2_spectrum_window_correlation(*get_data_randoms, spectrum: typ
                     digitized.add(1)
 
                 if nsplits > 1:
-    
+
                     def _get_uniform(size, seed=(84, 'index')):
                         return create_sharded_random(jax.random.uniform, _process_seed(seed), size, out_specs=P(sharding_mesh.axis_names,))
-                
+
                     def make_particle_splits(particles, x, nsplits, max_nsplits):
                         weights = wattrs(particles)
-                
+
                         def gen():
                             for isplit in range(max_nsplits):
                                 mask = (x >= isplit / nsplits) & (x < (isplit + 1) / nsplits)
                                 p = particles.clone(weights=weights * mask)
                                 yield _remove_phantom_particles(p, sharding_mesh=sharding_mesh)
-    
+
                         gen.nsplits = max_nsplits
-                
+
                         return gen
-                
+
                     if len(all_particles_resol) - len(digitized) > 1:
                         for ip, particles in enumerate(all_particles_resol):
                             if ip not in digitized:
@@ -997,7 +997,7 @@ def compute_smooth2_spectrum_window_correlation(*get_data_randoms, spectrum: typ
                 counts.append(count2split(*all_particles_resol, sattrs=sattrs, norm_ref=norm_ref))
                 if jax.process_index() == 0:
                     logger.info(f'Computed RR counts within {resol_limit} in {time.time() - t0:.1f} s')
-            
+
             def sum_counts(leaves):
                 return leaves[0].clone(counts=sum(leaf.values('counts') for leaf in leaves), norm=leaves[0].values('norm'))
 
@@ -1268,7 +1268,7 @@ def compute_window_mesh2_spectrum_fm(
     all_regression_maps = None
     if regression_maps is not None:
         if not is_sequence(regression_maps):
-            regresion_maps = [regression_maps]
+            regression_maps = [regression_maps]
         if isinstance(regression_maps[0], str):
             regression_maps = (regression_maps,) * ntracers
         all_regression_maps = {}
@@ -1290,6 +1290,11 @@ def compute_window_mesh2_spectrum_fm(
         los = "local"
     # Input power spectrum may be computed in a single region only (NGC), so boxcenter is probably wrong
     mattrs = {name: spectra[0].attrs[name] for name in ["boxsize", "meshsize"]}
+
+    knyq = np.pi / mattrs["boxsize"] * mattrs["cellsize"]
+    if theory.get(0).edges("k").max() > knyq:
+        logger.info("Limiting theory k_max to mesh k_nyquist.")
+        theory = theory.select(k=(0.0, knyq))
 
     with create_sharding_mesh(meshsize=mattrs.get("meshsize", None)):
         if amr:  # Add photometric template values to the catalogs, if AMR is applied, as they are needed for the regression
@@ -1499,8 +1504,7 @@ def compute_window_mesh2_spectrum_fm(
                 if jax.process_index() == 0: logger.info("Computing geometry window with desiwinds...")
                 _, windows["geometry"] = get_window_spikes(
                     **window_fm_kw,
-                    mock_survey_kwargs=mock_survey_kwargs
-                    | {"ric_args": None, "amr_args": None},
+                    mock_survey_kwargs=mock_survey_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None},
                 )
 
             if ric:
@@ -1653,7 +1657,7 @@ def compute_window_mesh2_spectrum_fm(
                     if geo:
                         if jax.process_index() == 0:
                             logger.info("Computing geometry window for ell=%i, optimal weights combination %i with desiwinds...", ell, iopt)
-                        _, _windows_fm_geo = get_window_spikes(**window_fm_kw, mock_survey_kwargs=mock_survey_kwargs | {"ric_args": None, "amr_args": None})
+                        _, _windows_fm_geo = get_window_spikes(**window_fm_kw, mock_survey_kwargs=mock_survey_kwargs | {"ric_args": None, "amr_args": None, "data_regions": None, "randoms_regions": None})
                         windows["geometry"][ell].append(_windows_fm_geo)
 
                     if ric:
@@ -1690,7 +1694,7 @@ def compute_window_mesh2_spectrum_fm(
         return windows
 
 
-def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: types.WindowMatrix, select: dict=None, theory: str='rept', fixed=tuple(), out: types.Mesh2SpectrumPoles=None):
+def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: types.WindowMatrix, select: dict=None, theory: str='rept', update_params=None, out: types.Mesh2SpectrumPoles=None):
     """
     Compute a smooth theory spectrum to assume when building the covariance.
 
@@ -1726,7 +1730,19 @@ def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: t
     # Compute Gaussian covariance (assuming Gaussian density field)
     covariance = compute_spectrum2_covariance(mattrs, data)  # Gaussian, diagonal covariance
 
+    # Import clustering theory classes from desilike
+    from desilike.theories.galaxy_clustering import FixedSpectrum2Template, KaiserTracerSpectrum2Poles, REPTVelocileptorsTracerSpectrum2Poles, DampedBAOWigglesTracerSpectrum2Poles
+    from desilike.observables.galaxy_clustering import Spectrum2PolesObservable
+    from desilike.likelihoods import ObservablesGaussianLikelihood
+    from desilike.profilers import Profiler, Minuit
+    from desilike import compile, get_params, Posterior
+
+    # Select theory model (Kaiser or REPT with velocileptors)
+    theory_str = theory
+    Theory = {'recon': DampedBAOWigglesTracerSpectrum2Poles, 'rept': REPTVelocileptorsTracerSpectrum2Poles, 'kaiser': KaiserTracerSpectrum2Poles}[theory_str]
+
     # Apply selection to data (restrict to fitting range)
+    # start at kmin = 0.1 for BAO, to constrain broadband terms
     select = select or {'k': (0.02, 10.)}
     data = data.select(**select)
     # Match window to data range
@@ -1738,32 +1754,38 @@ def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: t
     # Extract effective redshift from window
     z = window.observable.get(ells=0).attrs['zeff']
 
-    # Import clustering theory classes from desilike
-    from desilike.theories.galaxy_clustering import FixedPowerSpectrumTemplate, KaiserTracerPowerSpectrumMultipoles, REPTVelocileptorsTracerPowerSpectrumMultipoles
-    from desilike.observables.galaxy_clustering import TracerPowerSpectrumMultipolesObservable
-    from desilike.likelihoods import ObservablesGaussianLikelihood
-    from desilike.profilers import MinuitProfiler
-
-    # Select theory model (Kaiser or REPT with velocileptors)
-    Theory = {'rept': REPTVelocileptorsTracerPowerSpectrumMultipoles, 'kaiser': KaiserTracerPowerSpectrumMultipoles}[theory]
-
     # Create fiducial theory template at measurement redshift
-    template = FixedPowerSpectrumTemplate(fiducial='DESI', z=z)
+    template = FixedSpectrum2Template(fiducial='DESI', z=z)
     # Instantiate theory model with template
     theory = Theory(template=template)
+    if 'recon' in theory_str:
+        theory.update(mode=np.asarray(data.attrs['recon_mode']).flat[0], smoothing_radius=np.asarray(data.attrs['recon_smoothing_radius']).flat[0])
+        params = get_params(theory)
+        # To avoid spike at low k
+        for param in params.select(basename=['al*_[-4:0]']):
+            param.update(fixed=True)
+        for ell in theory.ells:
+            for ik in range(4):
+                params.set(params['al0_0'].clone(name=f'al{ell:d}_{ik}'))
+        theory.update(params=params)
     # Create observable: combines data, theory, and window function
-    observable = TracerPowerSpectrumMultipolesObservable(data=data, window=window, theory=theory)
+    observable = Spectrum2PolesObservable(data=data, window=window, theory=theory)
     # Create likelihood: Gaussian likelihood with computed covariance
     likelihood = ObservablesGaussianLikelihood(observable, covariance=covariance.value())
     # Fix specified parameters
-    for param in fixed:
-        likelihood.all_params[param].update(fixed=True)
+    params = get_params(likelihood)
+    if update_params is not None:
+        for name, update in update_params.items():
+            params[name].update(**update)
 
     # Minimize likelihood to get best-fit theory
-    profiler = MinuitProfiler(likelihood, seed=42)
+    posterior = compile(Posterior(likelihood))    
+    profiler = Profiler(posterior, kernel=Minuit(), rng=42)
     profiles = profiler.maximize()
     # Get best-fit parameters
-    params = profiles.bestfit.choice(index='argmax', input=True)
+    if profiler.mpicomm.rank == 0:
+        print(profiles.to_stats(tablefmt='pretty'))
+    params = profiles.choice(index='argmax', squeeze=True).select(input=True).best
     if out is None:
         # Build smooth theory spectrum from best-fit parameters
         poles = []
@@ -1778,8 +1800,8 @@ def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: t
                     # Zero out shot noise for higher multipoles (only monopole has shot noise)
                     pole = pole.clone(num_shotnoise=np.zeros_like(pole.values("num_shotnoise")))
             # Evaluate theory at k-values from data
-            theory.init.update(k=pole.coords("k"))
-            value = theory(**params)[ill]
+            theory.update(k=pole.coords("k"))
+            value = compile(theory)(params)[ill]
             pole = pole.clone(value=value)
             poles.append(pole)
         # Build spectrum object from theory poles
@@ -1789,8 +1811,8 @@ def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: t
         value = []
         for label, pole in out.items(level=1):
             # Evaluate theory at k-values
-            theory.init.update(k=pole.coords('k'))
-            value.append(theory(**params)[theory.ells.index(label['ells'])])
+            theory.update(k=pole.coords('k'))
+            value.append(compile(theory)(params)[theory.ells.index(label['ells'])])
         smooth = out.clone(value=value)
     return smooth
 
@@ -1814,7 +1836,7 @@ def compute_covariance_mesh2_spectrum(*get_data_randoms, theory=None, fields=Non
 
     Returns
     -------
-    covarance : CovarianceMatrix
+    covariance : CovarianceMatrix
         The computed 2-point spectrum covariance.
     """
     # Import covariance and window computation tools from jaxpower
@@ -1853,11 +1875,6 @@ def compute_covariance_mesh2_spectrum(*get_data_randoms, theory=None, fields=Non
 
     # Convert correlation to power spectrum covariance matrix via FFTLog
     covariance = compute_spectrum2_covariance(windows, theory, flags=['smooth'] + (['fftlog'] if fftlog else []))
-    # Update label names to match observable structure
-    fields = covariance.observable.fields
-    # Create observable tree with proper labels
-    observable = types.ObservableTree(list(covariance.observable), observables=['spectrum2'] * len(fields), tracers=fields)
-    covariance = covariance.clone(observable=observable)
     # Store in results dict
     results['raw'] = covariance
     return results

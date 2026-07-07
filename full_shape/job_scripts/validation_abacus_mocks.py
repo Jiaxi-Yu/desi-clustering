@@ -2,9 +2,10 @@
 Script to run fits with Abacus mocks.
 To create and spawn the tasks on NERSC, use the following commands:
 ```bash
+salloc -N 1 -C gpu -t 02:00:00 --gpus 4 --qos interactive --account desi_g
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
-python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 --stats mesh2_spectrum mesh3_spectrum --todo profile sample
-srun -n 4 python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 LRG2 LRG3 ELG2 --stats mesh2_spectrum mesh3_spectrum --theory_model folpsEFT --cosmo_params base_ns-fixed --todo sample --nchains 4
+python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 --stats mesh2_spectrum mesh3_spectrum --todo build
+srun -n 4 python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 LRG2 LRG3 ELG2 --stats mesh2_spectrum mesh3_spectrum--todo sample --nchains 4
 ```
 """
 import argparse
@@ -19,12 +20,15 @@ from full_shape import tools, setup_logging
 setup_logging()
 
 
-THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors']
+THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors', 'comet']
 COSMO_MODELS = ['base', 'base_ns-fixed', 'fixed']
 PRIOR_BASES = ['physical', 'physical_aap', 'tcm_chudaykin_aap', 'standard']
-SAMPLERS = ['emcee', 'mcmc']
-DEFAULT_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics/full_shape/base')
-DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / '_cache'
+SAMPLERS = ['emcee', 'zeus', 'mhmcmc', 'nuts', 'pocomc', 'nautilus', 'numpyro_nuts', 'numpyro_barker']
+DEFAULT_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics')
+DEFAULT_PROJECT = 'full_shape/base'
+#DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / '_cache'
+DEFAULT_CACHE_DIR = Path(os.environ['SCRATCH']) / 'desi-clustering/full_shape/job_scripts/_cache'
+
 LOCAL_SAFE_THREAD_ENV = {
     'OMP_NUM_THREADS': '1',
     'OPENBLAS_NUM_THREADS': '1',
@@ -32,13 +36,12 @@ LOCAL_SAFE_THREAD_ENV = {
 }
 KRANGES = {
     'mesh2_spectrum': [
-        {'ells': 0, 'k': [0.02, 0.40, 0.005]},
-        {'ells': 2, 'k': [0.02, 0.40, 0.005]},
-        {'ells': 4, 'k': [0.02, 0.40, 0.005]},
+        {'ells': 0, 'k': [0.02, 0.20, 0.01]},
+        {'ells': 2, 'k': [0.02, 0.20, 0.01]},
     ],
     'mesh3_spectrum': [
-        {'ells': (0, 0, 0), 'k': [0.02, 0.20, 0.005]},
-        {'ells': (2, 0, 2), 'k': [0.02, 0.20, 0.005]},
+        {'ells': (0, 0, 0), 'k': [0.02, 0.20, 0.01]},
+        {'ells': (2, 0, 2), 'k': [0.02, 0.03, 0.01]},
     ],
 }
 
@@ -58,8 +61,8 @@ def _apply_kranges(observable_options):
     ]
 
 
-def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, theory_model,
-                               prior_basis='physical_aap'):
+def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
+                               prior_basis='physical_aap', emulator=True):
     _validate_theory_model(stats, theory_model)
     likelihoods = []
     for tracer in tracers:
@@ -69,19 +72,22 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, t
             version=version,
             covariance=covariance,
             stats_dir=stats_dir,
+            project=project,
+            emulator=emulator or theory_model != 'comet',
         )
         for observable_options in likelihood_options['observables']:
             _apply_kranges(observable_options)
             observable_options.setdefault('theory', {})
             observable_options['theory']['model'] = theory_model
+            #observable_options['theory']['marg'] = False
             observable_options['theory']['prior_basis'] = prior_basis
         likelihoods.append(likelihood_options)
     return likelihoods
 
 
-def _build_run_options(stats, tracers, version, covariance, stats_dir, theory_model,
-                       cosmo_model='base', template='direct', sampler='emcee', nchains=1, thin_by=1,
-                       resume=False, prior_basis='physical_aap'):
+def _build_run_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
+                       cosmo_model='base', template='direct', sampler='emcee', nchains=1,
+                       resume=False, prior_basis='physical_aap', emulator=True):
     options = {}
     options['likelihoods'] = _build_likelihoods_options(
         stats=stats,
@@ -89,16 +95,19 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, theory_mo
         version=version,
         covariance=covariance,
         stats_dir=stats_dir,
+        project=project,
         theory_model=theory_model,
         prior_basis=prior_basis,
+        emulator=emulator,
     )
-    options['cosmology'] = {'template': template, 'model': cosmo_model}
-    options['sampler'] = {
-        'sampler': sampler,
-        'nchains': nchains,
-        'resume': resume,
-        'run': {'thin_by': thin_by},
-    }
+    options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
+    options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
+    sampler_kw = {'nparallel': nchains}
+    for section in ['init', 'run']:
+        for name, value in options['sampler'][section].items():
+            if name in sampler_kw:
+                options['sampler'][section][name] = sampler_kw[name]
+    options['sampler']['resume'] = resume
     return tools.fill_fiducial_options(options)
 
 
@@ -112,27 +121,31 @@ def _apply_local_safe_threads(environ=None):
 def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-complete',
             covariance='holi-v1-altmtl',
             stats_dir=DEFAULT_STATS_DIR,
+            project='full_shape/base',
             fits_dir=Path(os.getenv('SCRATCH', '.')) / 'fits',
             cache_dir=DEFAULT_CACHE_DIR,
             stats=['mesh2_spectrum'], tracers=None, theory_model='folpsD',
-            cosmo_model='base', sampler='emcee', nchains=1, thin_by=1, resume=False,
-            prior_basis='physical_aap', local_safe_threads=False):
+            cosmo_model='base', sampler='emcee', nchains=1, resume=False,
+            prior_basis='physical_aap', emulator=True, local_safe_threads=False):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
     from pathlib import Path
     import functools
-    from mpi4py import MPI
-    mpicomm = MPI.COMM_WORLD
     if local_safe_threads:
         _apply_local_safe_threads()
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(mpicomm.rank)
+    from desilike import distributed
+    try: distributed.initialize()
+    except RuntimeError: print('Distributed environment already initialized')
+    else: print('Initializing distributed environment')
+    mpicomm = distributed.get_mpicomm()
     import jax
     from jax import config
     config.update('jax_enable_x64', True)
     from full_shape import run_fit_from_options, setup_logging
     from full_shape.tools import get_likelihood
+    from desilike import compile
     from desilike.samples import Profiles
     # You can pass region, version, covariance, ...
     options = _build_run_options(
@@ -141,14 +154,15 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         version=version,
         covariance=covariance,
         stats_dir=stats_dir,
+        project=project,
         theory_model=theory_model,
         cosmo_model=cosmo_model,
         template=template,
         sampler=sampler,
         nchains=nchains,
-        thin_by=thin_by,
         resume=resume,
         prior_basis=prior_basis,
+        emulator=emulator,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -157,15 +171,15 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         likelihood = get_likelihood(likelihoods_options=options['likelihoods'],
                                     cosmology_options=options['cosmology'],
                                     cache_dir=cache_dir)
-        profiles = Profiles.load(get_fits_fn(kind='profiles', **options))
-        likelihood(**profiles.bestfit.choice(input=True, index='argmax'))
+        fn = get_fits_fn(kind='profiles', **options)
+        profiles = Profiles.read(fn)
+        # Evaluate likelihood at dictionary of parameters
+        best = profiles.choice(index='argmax', squeeze=True).select(input=True).best
+        compile(likelihood)(**best)
         if mpicomm.rank == 0:
-            plot_dir = get_fits_fn(kind='profiles', **options).parent
+            plot_dir = fn.parent
             for ilikelihood, sublikelihood in enumerate(likelihood.likelihoods):
                 for iobservable, observable in enumerate(sublikelihood.observables):
-                    plot_covariance = sublikelihood.covariance.at.observable.get(observables=observable.name)
-                    plot_covariance = plot_covariance.at.observable.match(observable.data)
-                    observable.covariance = plot_covariance
                     observable.plot(fn=plot_dir / f'plot_likelihood{ilikelihood}_observable{iobservable}.png')
 
 
@@ -198,16 +212,19 @@ def _get_parser():
                         help='Tracer(s) to fit. Pass one or more values after --tracers. Defaults to LRG1.')
     parser.add_argument('--fits_dir', type=str, default=None,
                         help='Base directory for fits. Defaults to $SCRATCH/fits_abacus_mocks or ./fits_abacus_mocks.')
-    parser.add_argument('--stats_dir', type=str, default=None,
+    parser.add_argument('--stats_dir', type=str, default=DEFAULT_STATS_DIR,
                         help=f'Base directory for clustering statistics. Defaults to {DEFAULT_STATS_DIR}.')
-    parser.add_argument('--cache_dir', type=str, default=None,
+    parser.add_argument('--project', type=str, default=DEFAULT_PROJECT,
+                        help=f'Base directory for clustering statistics. Defaults to {DEFAULT_PROJECT}.')
+    parser.add_argument('--cache_dir', type=str, default=DEFAULT_CACHE_DIR,
                         help=f'Base directory for cached prepared stats and emulators. Defaults to {DEFAULT_CACHE_DIR}.')
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
-    parser.add_argument('--thin_by', type=int, default=1,
-                        help='Thin samples by this factor while the desilike sampler is running. Defaults to 1.')
     parser.add_argument('--resume', action='store_true',
                         help='Resume sampling from existing chain files in the derived fits directory.')
+    parser.add_argument('--no_emulator', action='store_true',
+                        help='Disable Taylor emulators and evaluate the theory directly. '
+                             'Useful for fixed-cosmology, nuisance-only fits.')
     parser.add_argument('--local_safe_threads', action='store_true',
                         help='Limit OpenMP/BLAS thread counts for local macOS CLASS/OpenMP crashes. '
                              'Defaults to off so cluster runs keep their normal threading.')
@@ -222,13 +239,13 @@ if __name__ == '__main__':
     fits_dir = base_fits_dir / args.dataset
     version = args.dataset
     covariance = 'holi-v3-altmtl'
-    stats_dir = Path(args.stats_dir) if args.stats_dir is not None else DEFAULT_STATS_DIR
-    cache_dir = Path(args.cache_dir) if args.cache_dir is not None else DEFAULT_CACHE_DIR
+    stats_dir = Path(args.stats_dir)
+    cache_dir = Path(args.cache_dir)
     stats = args.stats
     tracers = args.tracers or ['LRG1']
     _validate_theory_model(stats, args.theory_model)
-    run_fit(actions=args.todo, version=version, covariance=covariance, stats_dir=stats_dir,
+    run_fit(actions=args.todo, version=version, covariance=covariance, stats_dir=stats_dir, project=args.project,
             fits_dir=fits_dir, cache_dir=cache_dir, stats=stats, tracers=tracers, theory_model=args.theory_model,
             cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
-            thin_by=args.thin_by, resume=args.resume, prior_basis=args.prior_basis,
-            local_safe_threads=args.local_safe_threads)
+            resume=args.resume, prior_basis=args.prior_basis,
+            local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator)
