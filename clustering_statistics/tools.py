@@ -1032,8 +1032,9 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 cat_dir = cat_dir / 'v1.5'
             ext = 'fits'
 
-        elif version in ['data-dr2-v1.1', 'data-dr2-v2', 'data-dr2-v2.1', 'data-dr2-test']:
-            version = version.split('-')[-1]
+        elif version in ['data-dr2-v1.1', 'data-dr2-v2', 'data-dr2-v2.1', 'data-dr2-test', 'data-dr2-v2-cmblens', 'data-dr2-test-maskedfraczpNN']:
+            input_version = version
+            version = version.split('-')[2]
             if kind == 'full_data' and 'BGS_BRIGHT' in tracer:
                 tracer = 'BGS_BRIGHT'
             if version == 'v1.1':
@@ -1042,7 +1043,13 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'parent_randoms':
                 program = 'bright' if 'BGS' in tracer else 'dark'
                 return [_find_extension(cat_dir / f'{program}_{iran}_full_noveto.ran', None) for iran in nrans]
-            if 'bitwise' in weight:
+            if 'maskedfraczpNN' in input_version:
+                data_dir = cat_dir / 'maskedfraczpNN'
+                cat_dir = cat_dir.parent / 'v2'  # for full catalogs
+            elif 'cmblens' in input_version:
+                data_dir = cat_dir / 'CMBLENS'
+                cat_dir = cat_dir.parent / 'v2'  # for full catalogs
+            elif 'bitwise' in weight:
                 data_dir = cat_dir / 'PIP'
             else:
                 data_dir = cat_dir / 'nonKP'
@@ -1221,7 +1228,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 # Reason: there are only randoms for nran=8-17
                 # return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/raw/rands_intiles_DARK_{iran:d}_NO_imagingmask_withz.fits' for iran in range(8,18)]
                 # return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/imaging_mask_applied/rands_intiles_DARK_{iran:d}_withz.fits' for iran in range(8,18)]
-                return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/imaging_mask_applied/rands_intiles_DARK_{iran:d}_withz.fits' for iran in range(8,18)]
+                return [desi_dir / f'mocks/cai/abacus_HF/DR2_v1.0/randoms/imaging_mask_applied/rands_intiles_DARK_{iran:d}_withz.fits' for iran in range(8, 18)]
 
         elif version == 'abacus-hf-dr2-v2-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/AbacusHF_DR2v2'
@@ -2096,14 +2103,14 @@ def set_catalog_weights(catalog, kind, weight=None, FKP_P0=None, binned_weight=N
                     bitwise_weights = None
             else:  # parent
                 # equivalent of IIP weights
-                if 'NEW_WEIGHTFRACZ' in catalog and 'nn' in weight_type.lower():
+                if 'nn' in weight_type.lower():
                     individual_weight *= catalog['NEW_WEIGHTFRACZ']
                 else:
                     individual_weight /= catalog['FRACZ_TILELOCID']
-                if 'compondata' in weight_type:
-                    individual_weight /= catalog['FRAC_TLOBS_TILES']
+                    if 'compondata' in weight_type:
+                        individual_weight /= catalog['FRAC_TLOBS_TILES']
                 bitwise_weights = None
-        if 'data' in kind and 'parent' in kind and 'bitwise' not in weight_type and 'compondata' not in weight_type:
+        if 'data' in kind and 'parent' in kind and 'bitwise' not in weight_type and 'compondata' not in weight_type and 'nn' not in weight_type:
             individual_weight *= catalog['FRAC_TLOBS_TILES']
         catalog['INDWEIGHT'] = individual_weight
         if bitwise_weights is not None: catalog['BITWEIGHT'] = bitwise_weights
