@@ -556,7 +556,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum']['edges'] = {'step': 40.}
     propose_fiducial['covariance_mesh3_spectrum']['buffer_size'] = propose_fiducial['window_mesh3_spectrum']['buffer_size']
     propose_fiducial['rotation_mesh2_spectrum'] = {'select': {'k': slice(0, None, 5)}}
-    from .systematic_templates import get_template_mock_fns
+    from systematic_templates import get_template_mock_fns
     propose_fiducial['systematic_templates'] = {'templates': {'auw': {'extra': 'auw'}, 'raw': {},
                                                               'mock_amr': get_template_mock_fns,
                                                               'mock_noamr': get_template_mock_fns,
@@ -1634,7 +1634,7 @@ def _compute_binned_weight(ntile, weight, mpicomm=None):
         sum_ntile = mpicomm.allreduce(sum_ntile)
         sum_weight = mpicomm.allreduce(sum_weight)
     mask_zero_ntile = sum_ntile == 0
-    return np.divide(sum_weight, sum_ntile, out=np.ones_like(sum_weight), where=~mask_zero_ntile)
+    return np.divide(sum_weight, sum_ntile, out=np.ones_like(sum_weight, dtype='float64'), where=~mask_zero_ntile)
 
 
 def get_binned_weight(catalog, binned_weight):
@@ -2881,16 +2881,29 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
     """
     assert forfa_data.mpicomm.size == 1
     assert full_data.mpicomm.size == 1
-    forfa_data = forfa_data[['TARGETID', 'RSDZ']]
-    forfa_data['Z'] = forfa_data.pop('RSDZ')
+    _tracer = tracer # to save full tracer name. Needed for BGS.
     tracer = get_simple_tracer(tracer)
     P0 = {'BGS': 7e3, 'LRG': 1e4, 'LGE': 1e4, 'ELG': 4e3, 'QSO': 6e3}[tracer]
-    full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN'] + (['R_MAG_ABS'] if 'BGS' in tracer else [])]
+    if 'R_MAG_ABS' in full_data.columns():
+        logger.info('Using R_MAG_ABS in Full data')
+        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN', 'R_MAG_ABS']] 
+        forfa_data = forfa_data[['TARGETID', 'RSDZ']]
+    elif 'TRACER_TYPE' in forfa_data.columns():
+        logger.info('Using TRACER_TYPE in forFA data')
+        full_data  = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN']]
+        forfa_data = forfa_data[['TARGETID', 'RSDZ','TRACER_TYPE']]
+    else:
+        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN']]
+        forfa_data = forfa_data[['TARGETID', 'RSDZ']]
+    forfa_data['Z'] = forfa_data.pop('RSDZ')
+    
     # 'FRACZ_TILELOCID', 'FRAC_TLOBS_TILES'
     _, full_index, forfa_index = np.intersect1d(full_data['TARGETID'], forfa_data['TARGETID'], return_indices=True)
     data = full_data[full_index]
     forfa_data = forfa_data[forfa_index]
     data['Z'] = forfa_data['Z']
+    if 'TRACER_TYPE' in forfa_data.columns():
+        data['TRACER_TYPE'] = forfa_data['TRACER_TYPE']
     _mask_assigned = data['ZWARN'] != 999999
     if with_completeness:
         mask_assigned = _mask_assigned
@@ -2937,7 +2950,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
             zrange = (0.4, 1.1)
 
         if tracer.startswith('BGS'):
-            if True: #'ANY' in tracer:
+            if 'R_MAG_ABS' in data.columns() and '-02' in _tracer:
                 fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
                 fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
                 fit_zcut = 0.3
@@ -2952,8 +2965,27 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
                 downsample_mag = data['R_MAG_ABS'] < mock_z_cut
                 data = data[downsample_mag]
             else:
-                downsample_mag = data['R_MAG_ABS'] < -21.35
+                # logger.info(f"{(data['TRACER_TYPE'] == _tracer.encode()).sum()}")
+                downsample_mag = data['TRACER_TYPE'] == _tracer.encode() # TODO: figure out where the values of 'TRACER_TYPE' got converted to byte strings)
                 data = data[downsample_mag]
+                
+            # if True: #'ANY' in tracer:
+            #     fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
+            #     fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
+            #     fit_zcut = 0.3
+            #     def fit(z):
+            #         ff = np.empty(len(z))
+            #         mask_a = z < fit_zcut
+            #         mask_b = ~mask_a
+            #         ff[mask_a] = fit_a(z[mask_a])
+            #         ff[mask_b] = fit_b(z[mask_b])
+            #         return ff + 0.078
+            #     mock_z_cut = fit(data['Z'])
+            #     downsample_mag = data['R_MAG_ABS'] < mock_z_cut
+            #     data = data[downsample_mag]
+            # else:
+            #     downsample_mag = data['R_MAG_ABS'] < -21.35
+            #     data = data[downsample_mag]
             zfrac = 0.98
             zrange = (0.1, 0.5)
             mask = data.trues()
@@ -3043,7 +3075,7 @@ def altmtl_from_full_data(forfa_data, full_data, nz, tracer, seed=42, remove_con
         zfrac = 0.966
         zrange = (0.4, 1.1)
 
-    if tracer.startswith('BGS'):
+    if tracer.startswith('BGS'):        
         if True: #'ANY' in tracer:
             fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
             fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
