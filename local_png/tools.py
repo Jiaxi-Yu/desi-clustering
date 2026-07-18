@@ -166,11 +166,12 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
 
     # Auto-correlation: link ell2 bias / damping to ell0.
     if tracers[0] == tracers[1]:
+        suffix = f'_{nickname}' if nickname is not None else ''
         if len(zeffs[tracer]) > 1:
             zeff = [zeffs[tracer][ell] for ell in [0, 2]]
-            _rescale_bias_params(tracer=[f"{tracers[0]}_ell0", f"{tracers[0]}_ell2"], zeff=zeff)
+            _rescale_bias_params(tracer=[f"{tracers[0]}{suffix}_ell0", f"{tracers[0]}{suffix}_ell2"], zeff=zeff)
             # logger.warning('we neglect the redshift dependence of the damping term, for now') 
-            param_name_ell0, param_name_ell2 = f"{tracers[0]}_ell0.sigmas", f"{tracers[0]}_ell2.sigmas"
+            param_name_ell0, param_name_ell2 = f"{tracers[0]}{suffix}_ell0.sigmas", f"{tracers[0]}{suffix}_ell2.sigmas"
             all_params[param_name_ell2].update(derived='sigmas', depends={'sigmas': all_params[param_name_ell0]}, prior=None)
             logger.debug(f"Derived damping: {param_name_ell2} = {param_name_ell0}")
 
@@ -179,14 +180,14 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
     # if derived_cross_bias is True: By default, link the bias of the cross-correlation to their auto-correlation counterparts. 
     #                                If the auto-correlation is not available in available_tracers, use one of the cross-correlation bias as default to link #                                all the others one to him.
     if tracers[0] != tracers[1]:
-        cross_suffix = f'_{nickname}' if nickname is not None else ''
+        suffix = f'_{nickname}' if nickname is not None else ''
         for i, tt in enumerate(tracers):
             if derived_cross_bias and (available_tracers is not None):
                 # if auto-tracer is available in available_tracers:
                 if 'x'.join([tt, tt]) in available_tracers:
                     # derived the bias from the auto-correlation bias, taking into account the different effective redshifts of the auto and cross correlation.
                     zeff = [zeffs['x'.join([tt, tt])][0], zeffs[tracer][0]]
-                    _rescale_bias_params(tracer=[f"{tt}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
+                    _rescale_bias_params(tracer=[f"{tt}_ell0", f'{tt}{suffix}_ell0'], zeff=zeff)
                 else:
                     # determine default tracer to link the bias parameters, if auto-correlation data is not available.
                     default_tracer = sorted([tracer for tracer in available_tracers if tt in tracer.split('x')])[0]
@@ -195,23 +196,23 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
                     else:
                         logger.debug(f'This parameter is free ({tt}, {tracer}), but it will be linked to {default_tracer} bias parameters to break degeneracy, since auto-tracer data for {tt} is not available.')
                         zeff = [zeffs[default_tracer][0], zeffs[tracer][0]]
-                        _rescale_bias_params(tracer=[f"{tt}_{default_tracer}_ell0", f'{tt}{cross_suffix}_ell0'], zeff=zeff)
+                        _rescale_bias_params(tracer=[f"{tt}_{default_tracer}_ell0", f'{tt}{suffix}_ell0'], zeff=zeff)
 
             else:
                 # let free the cross-correlation bias, but fix one of the two biases to break degeneracy.
                 # the first linear bias parameter can be set with kwargs.          
                 if i == 0:      
-                    default_b1 = kwargs.get(f"{tt}{cross_suffix}_ell0.b1", 1)
-                    all_params[f"{tt}{cross_suffix}_ell0.b1"].update(value=default_b1, fixed=True) 
+                    default_b1 = kwargs.get(f"{tt}{suffix}_ell0.b1", 1)
+                    all_params[f"{tt}{suffix}_ell0.b1"].update(value=default_b1, fixed=True) 
     
             if len(zeffs[tracer]) > 1:
                 zeff = [zeffs[tracer][ell] for ell in [0, 2]]
-                _rescale_bias_params(tracer=[f"{tt}{cross_suffix}_ell0", f"{tt}{cross_suffix}_ell2"], zeff=zeff)
+                _rescale_bias_params(tracer=[f"{tt}{suffix}_ell0", f"{tt}{suffix}_ell2"], zeff=zeff)
                 try:
                     # logger.warning('we neglect the redshift dependence of the damping term, for now')
                     # Note: the first damping term is fixed to 0 so only need to update the second one.
                     # prior=None to not double-count priors
-                    if i == 1: all_params[f"{tt}{cross_suffix}_ell2.sigmas"].update(derived='sigmas', depends={'sigmas': all_params[f"{tt}{cross_suffix}_ell0.sigmas"]}, prior=None)
+                    if i == 1: all_params[f"{tt}{suffix}_ell2.sigmas"].update(derived='sigmas', depends={'sigmas': all_params[f"{tt}{suffix}_ell0.sigmas"]}, prior=None)
                 except KeyError as e:
                     # It can happen now when removing the quadrupole from the cross-correlation in the join fit.
                     # (i could update zeff but okay just add more flexibility here)
@@ -449,11 +450,11 @@ def get_observable_and_likelihood(pk, window, cov, tracer='LRG', zeffs={'LRGxLRG
 
     observables = []
     for ell in pk.ells:
-        cross_suffix = f'_{nickname}' if (nickname is not None and cross_correlation) else ''
+        suffix = f'_{nickname}' if (nickname is not None) else ''
         if cross_correlation:
-            tracers_theo = [f'{tt}{cross_suffix}_ell{ell}' for tt in tracers]
+            tracers_theo = [f'{tt}{suffix}_ell{ell}' for tt in tracers]
         else:
-            tracers_theo = [f'{tt}_ell{ell}' for tt in tracers]
+            tracers_theo = [f'{tt}{suffix}_ell{ell}' for tt in tracers]
         if not cross_correlation: tracers_theo = tracers_theo[:1]
         if two_z is not None:
             logger.info(f'{tracers_theo=}, {ell=}, two-redshift cross: z_x={two_z[0]:2.4} ({tracers[0]}), z_y={two_z[1]:2.4} ({tracers[1]})')
@@ -667,7 +668,7 @@ def run_profiler(likelihood, fn_output=None):
 
     posterior = compile(Posterior(likelihood=likelihood))
     profiler = Profiler(posterior, kernel=Minuit(), rng=7)
-    profiles = profiler.maximize(niterations=10)
+    profiler.maximize(niterations=10)
     logger.info(f'\n{profiler.profiles.to_stats(tablefmt="pretty")}')
     best = profiler.profiles.choice(index='argmax', squeeze=True).select(input=True).best
     
@@ -675,9 +676,11 @@ def run_profiler(likelihood, fn_output=None):
     compile(likelihood)(best)
 
     if fn_output is not None:
+        fn_output = str(fn_output)
         if fn_output.endswith('.h5'):
+            # Not working now because, I can't load it with Profiles because of derive parameters..
             logger.info(f'Saving profiler results to {fn_output}.')
-            profiles.write(fn_output)
+            profiler.profiles.write(fn_output)
         elif fn_output.endswith('.npy'):
             ## Note: This will be removed after DR2... 
             logger.info(f'Bestfit values are saved in {fn_output}.')
@@ -686,7 +689,7 @@ def run_profiler(likelihood, fn_output=None):
         else:
             logger.warning(f'Output filename {fn_output} should end with .h5, skipping.')
      
-    return profiler
+    return profiler.profiles
 
 
 def run_mcmc(likelihood, dir_output='tmp/', resume=False, nchains=1, max_steps=20000, check_every=1000):
@@ -697,7 +700,7 @@ def run_mcmc(likelihood, dir_output='tmp/', resume=False, nchains=1, max_steps=2
         dir_output (str, optional): Where the chains will be saved. Defaults to 'tmp/samples_*.h5'.
         resume (bool, optional): If True, it will extend the existing chains (saved in dir_output) by running new iterations. Defaults to False.
         nchains (int, optional): Number of chains to run. Defaults to 1.
-        max_steps (int, optional): Maximum number of steps to run. Defaults to 1e5.
+        max_steps (int, optional): Maximum number of steps to run. Defaults to 20000.
         check_every (int, optional): How often to check the convergence + save the current state of the chains. Defaults to 1000.
 
     """
@@ -840,7 +843,7 @@ def plot_triangle(chains, params, legend_labels=None, xlabels=[r'$f_{\rm NL}^{\r
 
 def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=0, alternative_mocks=None, kmin=1e-3, drop_ell2_cross=True, 
                            analytical_covariance=True, 
-                           force_profiling=False, base_dir=None, fiducial=None, extra_fn='', return_profiler=False, save_plot=False):
+                           force_profiling=False, base_dir=None, fiducial=None, extra_fn='', return_profiles=False, save_plot=False):
     """Run the profiler on a single mock realisation and save the result to disk.
 
     Parameters
@@ -852,13 +855,15 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
     cov : lsstypes CovarianceMatrix
         Analytical covariance matrix for the tracer.
     tracer : str
-        Tracer name (e.g. 'LRGxLRG').
+        Tracer name (e.g. 'LRGxLRG' or 'LRGxLRG-QSOxQSO-LRGxQSO').
     region : str, optional
         Region name (e.g. 'GCcomb'). Default is 'GCcomb'.
     imock : int, optional
         Index of the mock to fit. Default is 0.
-    kmin : float, optional
-        Minimum k value for the fit. Default is 1e-3.
+    kmin : float or dict, optional
+        Minimum k value for the fit. Can be a scalar applied to all tracers, or a dict
+        mapping each tracer name to its own kmin (e.g. {'LRGxLRG': 4e-3, 'QSOxQSO': 2e-3}).
+        Default is 1e-3.
     analytical_covariance : bool, optional
         If True, use the analytical covariance. If False, use mock covariance. Default is True.
     force_profiling : bool, optional
@@ -869,35 +874,43 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
     import os
     from desilike import compile
 
-    # from clustering_statistics.tools import bias
-    # tt1 = short_tracer.split('x')[0]
-    # kwargs = {f'{tt1}_{short_tracer}_ell0.b1': bias(zeffs[region][short_tracer][0], tracer=tt1)}
     kwargs = {'LRG_LRGxQSO_ell0.b1': 2.25, 'LRG_LRGxELG_ell0.b1': 2.24, 'ELG_ELGxQSO_ell0.b1': 1.42, 'scale_covariance': 1}
 
-    fn_profile = Path(base_dir) /  f"mock{imock}/bestfit_{tracer}_{region}_{'analytical_cov' if analytical_covariance else 'mock_cov'}_kmin-{kmin}{extra_fn}.h5"
+    tracers = tracer.split('-')
+
+    # Resolve kmin per tracer: accept scalar or dict.
+    if isinstance(kmin, dict):
+        kmin_per_tracer = {tt: kmin[tt] for tt in tracers}
+    else:
+        kmin_per_tracer = {tt: kmin for tt in tracers}
+
+    # Build filename tag: scalar kmin -> single value, dict -> 'tt1:kmin1-tt2:kmin2...'
+    if isinstance(kmin, dict):
+        kmin_tag = '-'.join([f'{kmin_per_tracer[tt]:.0e}' for tt in tracers])
+    else:
+        kmin_tag = f'{kmin:.0e}' if not isinstance(kmin, dict) else '-'.join([f'{kmin_per_tracer[tt]:.0e}' for tt in tracers])
+
+    fn_profile = Path(base_dir) / f"mock{imock}/bestfit_{tracer}_{region}_{'analytical_cov' if analytical_covariance else 'mock_cov'}_kmin-{kmin_tag}{extra_fn}.npy"
     exists = fn_profile.is_file()
     if force_profiling or not exists:
         fn_profile.parent.mkdir(parents=True, exist_ok=True)
-
-        tracers = tracer.split('-')
 
         obs, lik, zeffs = {}, {}, {}
         pks = {}
         mocks_cov = {}
         for tt in tracers:
-            mocks_cov[tt] = mocks[tt].copy()  # Avoid modifying the original mock observable.
+            tt_kmin = kmin_per_tracer[tt]
+            mocks_cov[tt] = mocks[tt].copy()
 
-            pks[tt] = mocks_cov[tt].pop(imock).select(k=(kmin, 1))  # remove the used mock from the covariance matrix.
+            pks[tt] = mocks_cov[tt].pop(imock).select(k=(tt_kmin, 1))
             if (alternative_mocks is not None) and (tt in alternative_mocks) and (alternative_mocks[tt] is not None):
-                # use an alternative mock for the fit, but keep the covariance from the original mocks.
-                pks[tt] = alternative_mocks[tt].copy().pop(imock).select(k=(kmin, 1))
-            if drop_ell2_cross and (tt.split('x')[0] != tt.split('x')[1]):  # if it's a cross-correlation and we want to drop the ell2:
+                pks[tt] = alternative_mocks[tt].copy().pop(imock).select(k=(tt_kmin, 1))
+            if drop_ell2_cross and (tt.split('x')[0] != tt.split('x')[1]):
                 logger.info(f"{tt}: Dropping ell=2 for the cross-correlation to reduce hartlap factor and speed up the fit.")
-                pks[tt] = pks[tt].get(ells=[0])  # keep only the monopole for the fit.
+                pks[tt] = pks[tt].get(ells=[0])
             
             window = windows[tt].at.observable.match(pks[tt])
-
-            zeffs[tt] = {ell: window.observable.get(ell).attrs['zeff'] for ell in pks[tt].ells}  # Keep only the zeff for the used multipoles.
+            zeffs[tt] = {ell: window.observable.get(ell).attrs['zeff'] for ell in pks[tt].ells}
 
             if analytical_covariance:
                 covariance = covs[tt].at.observable.at(observables='spectrum2', tracers=tuple(tt.split("x"))).match(pks[tt])
@@ -912,15 +925,15 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
         else:
             obs, lik = obs[tracers[0]], lik[tracers[0]]
 
-        profiler = run_profiler(lik, fn_output=fn_profile)
+        profiles = run_profiler(lik, fn_output=fn_profile)
 
         if save_plot:
             ylims = [(2e3, 4e4), (2e3, 4e4)] if tracer in ['ELGxELG', 'ELGxQSO'] else None
-            fn_obs = base_dir / f"mock{imock}/bestfit_{tracer}_{'' if analytical_covariance else 'mock'}_kmin-{kmin}{extra_fn}.png"
+            fn_obs = base_dir / f"mock{imock}/bestfit_{tracer}_{'' if analytical_covariance else 'mock'}_kmin-{kmin_tag}{extra_fn}.png"
             if len(tracers) > 1:
                 plot_observables({tt: obs[tt] for tt in tracers}, ylims=ylims, fn_output=fn_obs, show=True)
             else: 
                 plot_observables({tracer: obs}, ylims=ylims, fn_output=fn_obs, show=True)
 
-        if return_profiler:
-            return profiler
+        if return_profiles:
+            return profiles
