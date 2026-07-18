@@ -62,8 +62,10 @@ def _apply_kranges(observable_options):
 
 
 def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
-                               prior_basis='physical_aap', emulator=True):
+                               prior_basis='physical_aap', emulator=True, bispectrum_theory_dk=None):
     _validate_theory_model(stats, theory_model)
+    if bispectrum_theory_dk is not None and bispectrum_theory_dk <= 0.:
+        raise ValueError('bispectrum_theory_dk must be positive.')
     likelihoods = []
     for tracer in tracers:
         likelihood_options = tools.generate_likelihood_options_helper(
@@ -77,6 +79,8 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
         )
         for observable_options in likelihood_options['observables']:
             _apply_kranges(observable_options)
+            if 'mesh3_spectrum' in observable_options['stat']['kind'] and bispectrum_theory_dk is not None:
+                observable_options.setdefault('window', {})['theory_dk'] = float(bispectrum_theory_dk)
             observable_options.setdefault('theory', {})
             observable_options['theory']['model'] = theory_model
             #observable_options['theory']['marg'] = False
@@ -87,7 +91,7 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
 
 def _build_run_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
                        cosmo_model='base', template='direct', sampler='emcee', nchains=1,
-                       resume=False, prior_basis='physical_aap', emulator=True):
+                       resume=False, prior_basis='physical_aap', emulator=True, bispectrum_theory_dk=None):
     options = {}
     options['likelihoods'] = _build_likelihoods_options(
         stats=stats,
@@ -99,6 +103,7 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, project, 
         theory_model=theory_model,
         prior_basis=prior_basis,
         emulator=emulator,
+        bispectrum_theory_dk=bispectrum_theory_dk,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
     options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
@@ -126,7 +131,8 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
             cache_dir=DEFAULT_CACHE_DIR,
             stats=['mesh2_spectrum'], tracers=None, theory_model='folpsD',
             cosmo_model='base', sampler='emcee', nchains=1, resume=False,
-            prior_basis='physical_aap', emulator=True, local_safe_threads=False):
+            prior_basis='physical_aap', emulator=True, local_safe_threads=False,
+            bispectrum_theory_dk=None):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -163,6 +169,7 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         resume=resume,
         prior_basis=prior_basis,
         emulator=emulator,
+        bispectrum_theory_dk=bispectrum_theory_dk,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -218,6 +225,11 @@ def _get_parser():
                         help=f'Base directory for clustering statistics. Defaults to {DEFAULT_PROJECT}.')
     parser.add_argument('--cache_dir', type=str, default=DEFAULT_CACHE_DIR,
                         help=f'Base directory for cached prepared stats and emulators. Defaults to {DEFAULT_CACHE_DIR}.')
+    parser.add_argument(
+        '--bispectrum-theory-dk', type=float, default=None, metavar='DK',
+        help=('Fix the first-stage bispectrum window-theory spacing independently of the observable '
+              'binning. Omit to retain the current dynamic behavior.'),
+    )
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
     parser.add_argument('--resume', action='store_true',
@@ -248,4 +260,5 @@ if __name__ == '__main__':
             fits_dir=fits_dir, cache_dir=cache_dir, stats=stats, tracers=tracers, theory_model=args.theory_model,
             cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
             resume=args.resume, prior_basis=args.prior_basis,
-            local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator)
+            local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator,
+            bispectrum_theory_dk=args.bispectrum_theory_dk)
