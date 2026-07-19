@@ -1074,6 +1074,9 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
     return likelihood
 
 
+SPECTRUM3_NATIVE_WINDOW_GRID = 'native'
+
+
 def _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=None):
     """Return the first-stage bispectrum theory-grid stride."""
     ostep, tstep = float(ostep), float(tstep)
@@ -1105,8 +1108,55 @@ def _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=None):
     return rebin
 
 
+def get_spectrum3_window_grid_info(ostep, tstep, theory_dk=None, second_stage_stride=2):
+    """Describe the bispectrum theory grid produced by window compactification.
+
+    ``theory_dk`` refers to the first-stage target used by
+    :func:`rebin_spectrum3_window`.  The routine subsequently applies the
+    non-diagonal compactification with ``second_stage_stride``; consequently
+    the final theory spacing is normally twice the requested first-stage
+    spacing.
+
+    The special value ``'native'`` bypasses both compactification stages.  It
+    is intended for sparse convergence checks, not production fits.
+    """
+    ostep, tstep = float(ostep), float(tstep)
+    if theory_dk == SPECTRUM3_NATIVE_WINDOW_GRID:
+        if not np.isfinite(ostep) or ostep <= 0.:
+            raise ValueError(f'Observable bispectrum spacing must be positive and finite; found {ostep}.')
+        if not np.isfinite(tstep) or tstep <= 0.:
+            raise ValueError(f'Native bispectrum theory spacing must be positive and finite; found {tstep}.')
+        return {
+            'observable_dk': ostep,
+            'native_theory_dk': tstep,
+            'requested_theory_dk': SPECTRUM3_NATIVE_WINDOW_GRID,
+            'first_stage_stride': 1,
+            'second_stage_stride': 1,
+            'final_theory_dk': tstep,
+            'compacted': False,
+        }
+    first_stage_stride = _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=theory_dk)
+    second_stage_stride = int(second_stage_stride)
+    if second_stage_stride < 1:
+        raise ValueError('second_stage_stride must be a positive integer.')
+    return {
+        'observable_dk': ostep,
+        'native_theory_dk': tstep,
+        'requested_theory_dk': 'dynamic' if theory_dk is None else float(theory_dk),
+        'first_stage_stride': first_stage_stride,
+        'second_stage_stride': second_stage_stride,
+        'final_theory_dk': tstep * first_stage_stride * second_stage_stride,
+        'compacted': True,
+    }
+
+
 def rebin_spectrum3_window(window, data=None, theory_dk=None):
-    """Compact a bispectrum window, optionally using a fixed first-stage theory spacing."""
+    """Compact a bispectrum window, optionally using a fixed first-stage theory spacing.
+
+    Pass ``theory_dk='native'`` to bypass compactification for numerical
+    reference evaluations.  Native evaluation can be substantially more
+    expensive and is not exposed by the production fitting CLI.
+    """
     if data is None:
         data = window.observable
     # Simplify window matrix
@@ -1115,12 +1165,21 @@ def rebin_spectrum3_window(window, data=None, theory_dk=None):
     window_theory = window.at.theory.get(types='theory') if with_templates else window
 
     tstep = min(np.diff(pole.edges('k'), axis=-1).min() for pole in window_theory.theory)
-    rebin = _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=theory_dk)
-    requested = 'dynamic' if theory_dk is None else f'{float(theory_dk):g}'
+    grid_info = get_spectrum3_window_grid_info(ostep, tstep, theory_dk=theory_dk)
+    if not grid_info['compacted']:
+        logger.info(
+            'Using native bispectrum window theory grid without compactification: '
+            'observable dk=%g, native/final theory dk=%g',
+            ostep, tstep,
+        )
+        window.attrs['spectrum3_window_grid'] = _json_attr(grid_info)
+        return window
+    rebin = grid_info['first_stage_stride']
     logger.info(
         'Compactifying bispectrum window theory: observable dk=%g, native theory dk=%g, '
-        'requested theory dk=%s, first-stage stride=%d, effective theory dk=%g',
-        ostep, tstep, requested, rebin, rebin * tstep,
+        'requested first-stage theory dk=%s, strides=(%d, %d), final theory dk=%g',
+        ostep, tstep, grid_info['requested_theory_dk'], rebin,
+        grid_info['second_stage_stride'], grid_info['final_theory_dk'],
     )
     window_theory = window_theory.at.theory.select(k=slice(0, None, rebin))
     # Compact non-diagonal term
@@ -1135,6 +1194,7 @@ def rebin_spectrum3_window(window, data=None, theory_dk=None):
                               theory=window.theory.at(types='theory').replace(window_theory.theory))
     else:
         window = window_theory
+    window.attrs['spectrum3_window_grid'] = _json_attr(grid_info)
     return window
 
 

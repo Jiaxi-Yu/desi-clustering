@@ -29,6 +29,21 @@ def test_spectrum3_theory_rebin_fixed_is_independent_of_observable_spacing():
     assert tools._get_spectrum3_theory_rebin(0.010, 0.005, theory_dk=0.005) == 1
 
 
+def test_spectrum3_grid_info_reports_both_compaction_stages():
+    dynamic = tools.get_spectrum3_window_grid_info(0.010, 0.0025)
+    fixed = tools.get_spectrum3_window_grid_info(0.010, 0.0025, theory_dk=0.005)
+    native = tools.get_spectrum3_window_grid_info(
+        0.010, 0.0025, theory_dk=tools.SPECTRUM3_NATIVE_WINDOW_GRID)
+
+    assert dynamic['first_stage_stride'] == 4
+    assert dynamic['second_stage_stride'] == 2
+    assert dynamic['final_theory_dk'] == pytest.approx(0.020)
+    assert fixed['first_stage_stride'] == 2
+    assert fixed['final_theory_dk'] == pytest.approx(0.010)
+    assert native['compacted'] is False
+    assert native['final_theory_dk'] == pytest.approx(0.0025)
+
+
 @pytest.mark.parametrize(
     ('ostep', 'tstep', 'theory_dk', 'message'),
     [
