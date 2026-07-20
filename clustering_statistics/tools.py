@@ -1127,6 +1127,15 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
 
+        elif version == 'holi-v4-altmtl-NN':
+            base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_v4/altmtl'
+            cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
+            ext = 'h5'
+            if kind == 'forfa_data':
+                return base_dir / f'forFA{imock:d}.fits'
+            if 'full' in kind:
+                cat_dir = cat_dir.parent
+
         elif version == 'holi-bgs-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_bgs'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
