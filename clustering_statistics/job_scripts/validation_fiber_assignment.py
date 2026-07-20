@@ -145,8 +145,8 @@ if __name__ == '__main__':
     check_for_existing_measurements = False
     stats, postprocess = [], []
     #version = 'abacus-hf-dr2-v2-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
-    version = 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN'
+    version = 'glam-uchuu-v2-altmtl'
+    #version = 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN'
     #version = 'glam-uchuu-v2-altmtl-maskedfraczpNN'
     #version = ('glam-uchuu-v2-altmtl', 'glam-uchuu-v2-altmtl-maskedfraczpNN')
     #version = 'abacus-2ndgen-dr2-complete'
@@ -164,7 +164,7 @@ if __name__ == '__main__':
     project = f'{analysis}/fiber_assignment_systematics'
     #project = f'{analysis}/fiber_assignment_systematics_tests'
     #project = f'{analysis}/fiber_assignment_systematics_ELG_{compweight}'
-    imocks = np.arange(22, 25)
+    imocks = np.arange(25)
     #imocks = np.arange(3, 9)
     #imocks = np.arange(14, 25)
     #imocks = np.arange(12, 25)
@@ -176,7 +176,7 @@ if __name__ == '__main__':
 
     if 'glam-uchuu-v2-altmtl' in version:
         check_for_existing_measurements = False
-        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[:25]
+        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[1:25]
         #imocks = [150]
 
     stats_dir = tools.base_stats_dir
@@ -207,14 +207,15 @@ if __name__ == '__main__':
     #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][2:]
     #stats = ['window_mesh3_spectrum']
     #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:2]
-    stats = ['mesh2_spectrum', 'close_pair_correction']
+    stats = ['mesh2_spectrum', 'close_pair_correction'][:0]
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
-    #weight = 'default-FKP'
+    weight = 'default-FKP'
     #weight = 'default-FKP-bitwise-iip'
-    weight = 'default-nn-FKP'
+    #weight = 'default-nn-FKP'
     #weight = 'default-FKP-noimsys'
     #weight = 'default'
+    #regions = ['NGC', 'SGC']
     regions = ['NGC', 'SGC']
     #regions = ['SGCnoDES', 'DES']
     max_mocks_per_batch = 5
@@ -256,17 +257,7 @@ if __name__ == '__main__':
                                                                                            region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
             imocks = exists[1]['imock']
         if True:
-            if any('window' in stat for stat in stats):
-                _imocks = imocks[:1]
-                nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
-                if nbatches >= 1:
-                    # Add dependence on other tasks
-                    get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
-            elif any('covariance' in stat for stat in stats):
+            if any('covariance' in stat for stat in stats):
                 get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
             elif stats:
                 batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]

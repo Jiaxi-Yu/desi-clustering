@@ -126,12 +126,12 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             compute_stats_from_options(stats, analysis=analysis, get_catalog_fn=_get_catalog_fn, get_stats_fn=_get_stats_fn, cache=cache, **options)
 
 
-def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='abacus-hf-dr2-v2-altmtl', onthefly=None, imocks=[150], stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', weight='default-FKP', postprocess=['combine_regions'], zranges=None, get_stats_fn=get_stats_fn, **kwargs):
+def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='abacus-hf-dr2-v2-altmtl', onthefly=None, imocks=[150], stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', weight='default-FKP', postprocess=['combine_regions'], zranges=None, get_stats_fn=get_stats_fn, regions=['NGC', 'SGC'], **kwargs):
     from clustering_statistics import postprocess_stats_from_options
     if zranges is None:
         zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
     options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, weight=weight, imock=imocks[0]), imocks=imocks,
-                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum', 'particle2_correlation', 'particle3_correlation'][:5]},
+                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum', 'particle2_correlation', 'particle3_correlation'][:5], 'regions': regions},
                    mesh2_spectrum={'cut': True, 'auw': True}, window_mesh2_spectrum={'cut': True},
                    mesh3_spectrum={'auw': True}, window_mesh3_spectrum={},
                    systematic_templates={'stats': ['mesh2_spectrum', 'mesh3_spectrum'], 'effects': ['auw', 'amr', 'ric']})
@@ -154,6 +154,7 @@ if __name__ == '__main__':
     version = 'data-dr2-v2'
     #version = 'data-dr2-test-maskedfracz'
     #version = 'data-dr2-test-maskedfraczpNN'
+    #version = 'data-dr2-v2-cmblens'
     analysis = 'full_shape_protected'
     cat_dir = None
     #compweight = 'tilelocid-LRG1'
@@ -195,19 +196,8 @@ if __name__ == '__main__':
     #tracers = ['BGS_ANY-02']
 
     # run data_splits for lensing group with full_shape setup
-    #stats = ['mesh2_spectrum', 'mesh3_spectrum']
-    #stats = ['mesh3_spectrum', 'close_pair_correction']
-    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum'][:1]
-    #stats = ['window_mesh2_spectrum', 'window_mesh3_spectrum']
-    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'particle2_correlation', 'particle3_correlation'][:2]
-    #stats = ['particle2_correlation', 'particle3_correlation', 'close_pair_correction'][:2]
-    #stats = ['particle2_correlation', 'close_pair_correction']
-    #stats = ['particle2_correlation']
-    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum']
     #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum']
-    #stats = ['window_mesh3_spectrum']
-    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:2]
-    stats = ['mesh2_spectrum', 'close_pair_correction']
+    #stats = ['mesh2_spectrum', 'close_pair_correction']
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
     weight = 'default-FKP'
@@ -215,7 +205,8 @@ if __name__ == '__main__':
     #weight = 'default-nn-FKP'
     #weight = 'default-FKP-noimsys'
     #weight = 'default'
-    regions = ['NGC', 'SGC']
+    regions = ['NGC', 'SGC', 'N', 'NGCnoN', 'S', 'SGCnoDES']  #galactic and imaging regions
+    regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i:d}' for i in [40, 60]] #lensing regions
     #regions = ['SGCnoDES', 'DES']
     max_mocks_per_batch = 5
 
@@ -237,7 +228,7 @@ if __name__ == '__main__':
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
-        zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][1:]
+        zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)]#[1:]
 
         def get_run_stats():
             if mode == 'interactive':
@@ -256,17 +247,7 @@ if __name__ == '__main__':
                                                                                            region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
             imocks = exists[1]['imock']
         if True:
-            if any('window' in stat for stat in stats):
-                _imocks = imocks[:1]
-                nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
-                if nbatches >= 1:
-                    # Add dependence on other tasks
-                    get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
-            elif any('covariance' in stat for stat in stats):
+            if any('covariance' in stat for stat in stats):
                 get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
             elif stats:
                 batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
