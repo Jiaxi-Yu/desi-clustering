@@ -114,16 +114,16 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
 if __name__ == '__main__':
 
     stats, postprocess = [], []
-    version = 'holi-v3-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
+    #version = 'holi-v3-altmtl'
+    version = 'glam-uchuu-v2-altmtl'
     check_for_existing_measurements = False
 
     imocks = np.arange(25)
     #imocks = np.arange(5, 25)
     #imocks = np.arange(5, 9)
     #imocks = np.arange(1)
-    #imocks = [150]
-    imocks = [0]
+    imocks = [150]
+    #imocks = [0]
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
@@ -167,7 +167,7 @@ if __name__ == '__main__':
             # do not compute measurements for overlapping redshifts
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
        
         def get_run_stats():
             if mode == 'interactive':

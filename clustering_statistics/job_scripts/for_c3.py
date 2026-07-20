@@ -71,6 +71,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
     for imock in imocks:
         for region in regions:
             correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
+            correction = True
             auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
             cut = correction
             mesh2_spectrum = {'cut': cut, 'auw': auw}
@@ -92,7 +93,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
-            options = fill_fiducial_options(options, analysis=analysis)
+            options = fill_fiducial_options(options, analysis='full_shape')
 
             for itracer in options['catalog']:
                 #options['recon'][itracer]['nran'] = 18
@@ -196,7 +197,7 @@ if __name__ == '__main__':
     #tracers = ['BGS_ANY-02']
 
     # run data_splits for lensing group with full_shape setup
-    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum']
+    stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][:0]
     #stats = ['mesh2_spectrum', 'close_pair_correction']
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
@@ -207,7 +208,7 @@ if __name__ == '__main__':
     #weight = 'default'
     regions = ['NGC', 'SGC', 'N', 'NGCnoN', 'S', 'SGCnoDES']  #galactic and imaging regions
     regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i:d}' for i in [40, 60]] #lensing regions
-    #regions = ['SGCnoDES', 'DES']
+    #regions = ['PLANCK_PR4'] + [f'GAL0{i:d}' for i in [40, 60]]
     max_mocks_per_batch = 5
 
     onthefly = None

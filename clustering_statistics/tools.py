@@ -556,7 +556,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum']['edges'] = {'step': 40.}
     propose_fiducial['covariance_mesh3_spectrum']['buffer_size'] = propose_fiducial['window_mesh3_spectrum']['buffer_size']
     propose_fiducial['rotation_mesh2_spectrum'] = {'select': {'k': slice(0, None, 5)}}
-    from systematic_templates import get_template_mock_fns
+    from .systematic_templates import get_template_mock_fns
     propose_fiducial['systematic_templates'] = {'templates': {'auw': {'extra': 'auw'}, 'raw': {},
                                                               'mock_amr': get_template_mock_fns,
                                                               'mock_noamr': get_template_mock_fns,
@@ -1127,6 +1127,15 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
 
+        elif version == 'holi-v4-altmtl-maskedfraczpNN':
+            base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_v4/altmtl'
+            cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
+            ext = 'h5'
+            if kind == 'forfa_data':
+                return base_dir / f'forFA{imock:d}.fits'
+            if 'full' in kind:
+                cat_dir = cat_dir.parent
+        
         elif version == 'holi-bgs-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_bgs'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'

@@ -954,6 +954,7 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
     theory.spectrum2 = spectrum2.clone(value=model[:size2])
     theory.spectrum3 = spectrum3.clone(value=model[size2:])
     theory.data2, theory.data3 = spectrum2, spectrum3
+    types.ObservableTree([theory.spectrum2, theory.spectrum3, theory.data2, theory.data3], kind=['spectrum2', 'spectrum3', 'data2', 'data3']).write('../nb/debug_cov3/theory_mesh3_covariance.h5')
     return theory
 
 
