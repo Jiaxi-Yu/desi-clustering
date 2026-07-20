@@ -556,7 +556,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum']['edges'] = {'step': 40.}
     propose_fiducial['covariance_mesh3_spectrum']['buffer_size'] = propose_fiducial['window_mesh3_spectrum']['buffer_size']
     propose_fiducial['rotation_mesh2_spectrum'] = {'select': {'k': slice(0, None, 5)}}
-    from systematic_templates import get_template_mock_fns
+    from .systematic_templates import get_template_mock_fns
     propose_fiducial['systematic_templates'] = {'templates': {'auw': {'extra': 'auw'}, 'raw': {},
                                                               'mock_amr': get_template_mock_fns,
                                                               'mock_noamr': get_template_mock_fns,
