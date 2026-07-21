@@ -137,8 +137,10 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
                                prior_basis='physical_aap', emulator=True,
                                folpsd_damping=FOLPSD_DAMPING,
                                folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-                               kmax_overrides=None):
+                               kmax_overrides=None, bispectrum_theory_dk=None):
     _validate_theory_model(stats, theory_model)
+    if bispectrum_theory_dk is not None and bispectrum_theory_dk <= 0.:
+        raise ValueError('bispectrum_theory_dk must be positive.')
     folpsd_damping_method = None if folpsd_damping_method == 'none' else folpsd_damping_method
     kranges = _apply_kmax_overrides(_get_kranges(), kmax_overrides)
     likelihoods = []
@@ -159,6 +161,8 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
         )
         for observable_options in likelihood_options['observables']:
             _apply_kranges(observable_options, kranges=kranges)
+            if 'mesh3_spectrum' in observable_options['stat']['kind'] and bispectrum_theory_dk is not None:
+                observable_options.setdefault('window', {})['theory_dk'] = float(bispectrum_theory_dk)
             observable_options.setdefault('theory', {})
             observable_options['theory']['model'] = theory_model
             #observable_options['theory']['marg'] = False
@@ -185,7 +189,7 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, project, 
                        profile_iterations=PROFILE_ITERATIONS,
                        folpsd_damping=FOLPSD_DAMPING,
                        folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-                       kmax_overrides=None):
+                       kmax_overrides=None, bispectrum_theory_dk=None):
     profile_iterations = int(profile_iterations)
     if profile_iterations <= 0:
         raise ValueError('profile_iterations must be positive.')
@@ -203,6 +207,7 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, project, 
         folpsd_damping=folpsd_damping,
         folpsd_damping_method=folpsd_damping_method,
         kmax_overrides=kmax_overrides,
+        bispectrum_theory_dk=bispectrum_theory_dk,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
     options['sampler'] = {
@@ -245,7 +250,7 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
             profile_iterations=PROFILE_ITERATIONS,
             folpsd_damping=FOLPSD_DAMPING,
             folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-            kmax_overrides=None):
+            kmax_overrides=None, bispectrum_theory_dk=None):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -288,6 +293,7 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         folpsd_damping=folpsd_damping,
         folpsd_damping_method=folpsd_damping_method,
         kmax_overrides=kmax_overrides,
+        bispectrum_theory_dk=bispectrum_theory_dk,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -356,6 +362,11 @@ def _get_parser():
         help=('Override one selection kmax; repeat as needed. Examples: '
               'mesh2_spectrum:0=0.15, mesh3_spectrum:0,0,0=0.10.'),
     )
+    parser.add_argument(
+        '--bispectrum-theory-dk', type=float, default=None, metavar='DK',
+        help=('Fix the first-stage bispectrum window-theory spacing independently of the observable '
+              'binning. Omit to retain the current dynamic behavior.'),
+    )
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
     parser.add_argument('--gelman_rubin', type=float, default=GELMAN_RUBIN,
@@ -398,4 +409,5 @@ if __name__ == '__main__':
             folpsd_damping=args.folpsd_damping,
             folpsd_damping_method=args.folpsd_damping_method,
             local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator,
-            kmax_overrides=kmax_overrides)
+            kmax_overrides=kmax_overrides,
+            bispectrum_theory_dk=args.bispectrum_theory_dk)
