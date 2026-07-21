@@ -551,9 +551,14 @@ def _get_covariance_correction_factor(covariance: types.CovarianceMatrix,
 
 
 def _get_prepared_cache_options(observables_options: list[dict], covariance_options: dict=None, kind: str=None):
+    def window_options(observable_options):
+        options = dict(observable_options.get('window', {}))
+        options.pop('theory_dk', None)
+        return options
+
     options = {'observables': [
         {name: dict(observable_options[name]) for name in ['stat', 'catalog']}
-        | ({'window': dict(observable_options['window'])} if 'window' in observable_options else {})
+        | ({'window': window_options(observable_options)} if 'window' in observable_options else {})
         for observable_options in observables_options
     ]}
     if kind == 'covariance':
@@ -922,7 +927,7 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
                     file_kw.pop('auw', None)  # auw stat has the same window as non-auw stat
                     window_options = {
                         key: value for key, value in observables_options[iobs].get('window', {}).items()
-                        if key != 'mode'
+                        if key not in ['mode', 'theory_dk']
                     }
                     file_kw = file_kw | window_options
                     #fn = _get_mock_stats_fn(f'window_{stat}', file_kw) if 'stats_dir' in file_kw else get_stats_fn(kind=f'window_{stat}', **file_kw)
@@ -1090,8 +1095,39 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
     return likelihood
 
 
-def rebin_spectrum3_window(window, data=None):
-    """Rebin spectrum3 window. TBC"""
+def _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=None):
+    """Return the first-stage bispectrum theory-grid stride."""
+    ostep, tstep = float(ostep), float(tstep)
+    if not np.isfinite(ostep) or ostep <= 0.:
+        raise ValueError(f'Observable bispectrum spacing must be positive and finite; found {ostep}.')
+    if not np.isfinite(tstep) or tstep <= 0.:
+        raise ValueError(f'Native bispectrum theory spacing must be positive and finite; found {tstep}.')
+    if theory_dk is None:
+        rebin = int(ostep / tstep)
+    else:
+        theory_dk = float(theory_dk)
+        if not np.isfinite(theory_dk) or theory_dk <= 0.:
+            raise ValueError(f'Fixed bispectrum theory spacing must be positive and finite; found {theory_dk}.')
+        ratio = theory_dk / tstep
+        rebin = int(np.rint(ratio))
+        if ratio < 1. or rebin < 1:
+            raise ValueError(
+                f'Fixed bispectrum theory spacing {theory_dk} cannot be finer than the native spacing {tstep}.'
+            )
+        if not np.isclose(ratio, rebin, rtol=1e-6, atol=1e-8):
+            raise ValueError(
+                f'Fixed bispectrum theory spacing {theory_dk} must be an integer multiple '
+                f'of the native spacing {tstep}.'
+            )
+    if rebin < 1:
+        raise ValueError(
+            f'Observable bispectrum spacing {ostep} cannot be finer than the native theory spacing {tstep}.'
+        )
+    return rebin
+
+
+def rebin_spectrum3_window(window, data=None, theory_dk=None):
+    """Compact a bispectrum window, optionally using a fixed first-stage theory spacing."""
     if data is None:
         data = window.observable
     # Simplify window matrix
@@ -1100,8 +1136,13 @@ def rebin_spectrum3_window(window, data=None):
     window_theory = window.at.theory.get(types='theory') if with_templates else window
 
     tstep = min(np.diff(pole.edges('k'), axis=-1).min() for pole in window_theory.theory)
-    rebin = int(ostep / tstep)
-    assert rebin >= 1
+    rebin = _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=theory_dk)
+    requested = 'dynamic' if theory_dk is None else f'{float(theory_dk):g}'
+    logger.info(
+        'Compactifying bispectrum window theory: observable dk=%g, native theory dk=%g, '
+        'requested theory dk=%s, first-stage stride=%d, effective theory dk=%g',
+        ostep, tstep, requested, rebin, rebin * tstep,
+    )
     window_theory = window_theory.at.theory.select(k=slice(0, None, rebin))
     # Compact non-diagonal term
     rebin = rebinning_matrix(window_theory.theory, new_coords=window_theory.theory.select(k=slice(0, None, 2)),
@@ -1212,7 +1253,8 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
             theory = get_theory(stat, theory_options=observable_options['theory'], cosmology=cosmology, data_attrs=data_attrs, data=data)
             if window is not None and cls == Spectrum3PolesObservable:
                 # Compactify window theory
-                window = rebin_spectrum3_window(window, data=data)
+                theory_dk = observable_options.get('window', {}).get('theory_dk', None)
+                window = rebin_spectrum3_window(window, data=data, theory_dk=theory_dk)
             if window is not None:
                 window = select_window_theory(window, data)
             templates = None
