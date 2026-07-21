@@ -363,7 +363,7 @@ def _get_parser():
               'mesh2_spectrum:0=0.15, mesh3_spectrum:0,0,0=0.10.'),
     )
     parser.add_argument(
-        '--bispectrum-theory-dk', type=float, default=None, metavar='DK',
+        '--bispectrum-theory-dk', type=float, default=0.005, metavar='DK',
         help=('Fix the first-stage bispectrum window-theory spacing independently of the observable '
               'binning. Omit to retain the current dynamic behavior.'),
     )
