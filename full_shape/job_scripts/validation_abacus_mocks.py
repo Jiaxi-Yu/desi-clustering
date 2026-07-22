@@ -29,7 +29,7 @@ FOLPSD_DAMPING_METHODS = [
     'none', 'loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn', 'all',
 ]
 FOLPSD_DAMPING = 'vdg'
-FOLPSD_DAMPING_METHOD = 'tree+loop+ctr'
+FOLPSD_DAMPING_METHOD = 'tree+loop'
 GELMAN_RUBIN = 1.03
 ESS = 700
 PROFILE_ITERATIONS = 4
@@ -133,7 +133,8 @@ def _apply_kranges(observable_options, kranges=None):
     ]
 
 
-def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
+def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir,
+                               project=DEFAULT_PROJECT, theory_model='folpsD',
                                prior_basis='physical_aap', emulator=True,
                                folpsd_damping=FOLPSD_DAMPING,
                                folpsd_damping_method=FOLPSD_DAMPING_METHOD,
@@ -182,7 +183,8 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
     return likelihoods
 
 
-def _build_run_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
+def _build_run_options(stats, tracers, version, covariance, stats_dir,
+                       project=DEFAULT_PROJECT, theory_model='folpsD',
                        cosmo_model='base', template='direct', sampler='emcee', nchains=1,
                        resume=False, prior_basis='physical_aap', emulator=True,
                        gelman_rubin=GELMAN_RUBIN, ess=ESS,
