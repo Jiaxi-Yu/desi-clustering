@@ -138,9 +138,7 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir,
                                prior_basis='physical_aap', emulator=True,
                                folpsd_damping=FOLPSD_DAMPING,
                                folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-                               kmax_overrides=None, mesh3_theory_dk=None,
-                               region='GCcomb', imock=None,
-                               covariance_project='full_shape/base', covariance_region=None):
+                               kmax_overrides=None, mesh3_theory_dk=None):
     _validate_theory_model(stats, theory_model)
     if mesh3_theory_dk is not None and mesh3_theory_dk <= 0.:
         raise ValueError('mesh3_theory_dk must be positive.')
@@ -160,8 +158,6 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir,
             covariance=tracer_covariance,
             stats_dir=stats_dir,
             project=project,
-            region=region,
-            imock=imock,
             emulator=emulator and theory_model != 'comet',
         )
         for observable_options in likelihood_options['observables']:
@@ -182,9 +178,7 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir,
         # Covariance mocks are stored beneath full_shape/base independently
         # of the project used for the fitted data vectors.
         likelihood_options['covariance']['source'] = 'mock'
-        likelihood_options['covariance']['project'] = covariance_project
-        if covariance_region is not None:
-            likelihood_options['covariance']['region'] = covariance_region
+        likelihood_options['covariance']['project'] = 'full_shape/base'
         likelihoods.append(likelihood_options)
     return likelihoods
 
@@ -197,9 +191,7 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir,
                        profile_iterations=PROFILE_ITERATIONS,
                        folpsd_damping=FOLPSD_DAMPING,
                        folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-                       kmax_overrides=None, mesh3_theory_dk=None,
-                       region='GCcomb', imock=None,
-                       covariance_project='full_shape/base', covariance_region=None):
+                       kmax_overrides=None, mesh3_theory_dk=None):
     profile_iterations = int(profile_iterations)
     if profile_iterations <= 0:
         raise ValueError('profile_iterations must be positive.')
@@ -218,10 +210,6 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir,
         folpsd_damping_method=folpsd_damping_method,
         kmax_overrides=kmax_overrides,
         mesh3_theory_dk=mesh3_theory_dk,
-        region=region,
-        imock=imock,
-        covariance_project=covariance_project,
-        covariance_region=covariance_region,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
     options['sampler'] = {
@@ -264,9 +252,7 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
             profile_iterations=PROFILE_ITERATIONS,
             folpsd_damping=FOLPSD_DAMPING,
             folpsd_damping_method=FOLPSD_DAMPING_METHOD,
-            kmax_overrides=None, mesh3_theory_dk=None,
-            region='GCcomb', imock=None,
-            covariance_project='full_shape/base', covariance_region=None):
+            kmax_overrides=None, mesh3_theory_dk=None):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -310,10 +296,6 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         folpsd_damping_method=folpsd_damping_method,
         kmax_overrides=kmax_overrides,
         mesh3_theory_dk=mesh3_theory_dk,
-        region=region,
-        imock=imock,
-        covariance_project=covariance_project,
-        covariance_region=covariance_region,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
