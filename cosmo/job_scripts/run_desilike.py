@@ -7,7 +7,7 @@ from cosmo.desilike.run import (get_likelihood_label, get_desilike_output,
 
 
 def profile(likelihoods, model='base', engine='class',
-            run='run1', output_dir=None, output_label=None, profiler='minuit', **kwargs):
+            run='run1', output_dir=None, output_label=None, profiler='minuit', timing=False, **kwargs):
     """Build posterior and run profiling for one configuration."""
     import os
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
@@ -15,13 +15,16 @@ def profile(likelihoods, model='base', engine='class',
     try: distributed.initialize()
     except RuntimeError: print('Distributed environment already initialized')
     from desilike import setup_logging
-    from cosmo.desilike.run import get_posterior, profile_desilike as _profile
+    from cosmo.desilike.run import get_posterior, time_posterior, profile_desilike as _profile
     setup_logging()
-    posterior = get_posterior(likelihoods, model=model, engine=engine)
+    posterior = get_posterior(likelihoods, model=model, engine=engine, truncate_priors=True)
+    if timing:
+        time_posterior(posterior)
+        return
     output_fn = get_desilike_output(model=model, engine=engine, likelihoods=likelihoods,
                                     kind='profiles', output_dir=output_dir, run=run, output_label=output_label)
     options = propose_fiducial_profiler_options(profiler)
-    return _profile(posterior, kernel=profiler, init=options['init'], run=options['maximize'], output_fn=output_fn)
+    _profile(posterior, kernel=profiler, init=options['init'], run=options['maximize'], output_fn=output_fn)
 
 
 def sample(likelihoods, model='base', engine='class',
@@ -35,11 +38,11 @@ def sample(likelihoods, model='base', engine='class',
     from desilike import setup_logging
     from cosmo.desilike.run import get_posterior, sample_desilike as _sample
     setup_logging()
-    posterior = get_posterior(likelihoods, model=model, engine=engine)
+    posterior = get_posterior(likelihoods, model=model, engine=engine, truncate_priors=True)
     output_dir_path = get_desilike_output(model=model, engine=engine, likelihoods=likelihoods,
                                           kind='samples', output_dir=output_dir, run=run, output_label=output_label)
     options = propose_fiducial_sampler_options(sampler)
-    return _sample(posterior, kernel=sampler, init=options['init'], run=options['run'],
+    _sample(posterior, kernel=sampler, init=options['init'], run=options['run'],
                    output_dir=output_dir_path, resume=resume)
 
 
@@ -70,13 +73,17 @@ def _setup_task_manager():
 
 if __name__ == '__main__':
 
-    todo = ['profile', 'sample'][1:]
+    todo = ['profile', 'sample'][:1]
     models = ['base']
     #likelihoods = [['desi-dr2-bao-all', 'desdovekie'], 'CMB-SP4A']
     #likelihoods = ['desi-dr2-bao-lya-fs']
-    likelihoods = [['abacus-dr2-fs-s2-s3-all-comet', 'desdovekie']]
+    #likelihoods = [['abacus-dr2-fs-s2-s3-all-comet']]
+    likelihoods = [['abacus-dr2-fs-s2-s3-bgs-folpsD', 'desdovekie']]
+    #likelihoods = [['desi-dr2-bao-all', 'planck2018-lowl-TT', 'planck2018-lowl-EE', 'planck2018-highl-plik-TTTEEE']]
+    #likelihoods = [['desi-dr2-bao-all', 'desdovekie']]
+    engine = 'ace'
     #engine = 'camb'
-    engine = None  # per-likelihood default: eisenstein_hu (comet FS), ACE emulators (folpsD FS), class otherwise
+    #engine = None  # per-likelihood default: eisenstein_hu (comet FS), ACE emulators (folpsD FS), class otherwise
     run = 'run1'
     output_dir = None
     resume = False
@@ -95,4 +102,4 @@ if __name__ == '__main__':
         if task == 'profile':
             profile(**config)
         else:
-            sample(resume=resume, sampler='emcee', **config)
+            sample(resume=resume, sampler='nautilus', **config)

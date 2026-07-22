@@ -18,7 +18,7 @@ from bao import tools, setup_logging
 setup_logging()
 
 
-def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='base/bao', covariance='jaxpower', recenter=False, stats_dir=tools.base_stats_dir, fits_dir=Path(os.getenv('SCRATCH')) / 'fits'):
+def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='base/bao', covariance='jaxpower', region='GCcomb', recenter=False, stats_dir=tools.base_stats_dir, fits_dir=Path(os.getenv('SCRATCH')) / 'fits'):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -45,6 +45,7 @@ def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='
     for likelihood_options in options['likelihoods']:
         # rascalc = analytical covariance
         for observable_options in likelihood_options['observables']:
+            observable_options['catalog']['region'] = region
             observable_options['stat']['jackknife'] = {'nsplits': 60}
             observable_options['stat']['project'] = 'bao/with_desi-clustering'
         cov_stats_dir = tools.base_stats_dir
@@ -56,7 +57,7 @@ def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='
     options = fill_fiducial_options(options)
 
     options['sampler'] = tools.propose_fiducial_sampler_options(sampler='emcee')
-    sampler_kw = {'nparallel': mpicomm.size, 'gelman_rubin': 1.01, 'ess': 1000}
+    sampler_kw = {'nparallel': mpicomm.size, 'gelman_rubin': 1.04, 'ess': 600}
     # Distribute arguments
     for section in ['init', 'run']:
         for name, value in options['sampler'][section].items():
@@ -66,25 +67,16 @@ def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='
     options['profiler']['maximize']['niterations'] = 5
 
     # options contains all possible options; print(options) to look at its content
-    get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir, project=project)
+    get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir, project=project, level={'catalog': 3})
     run_fit_from_options(actions, **options, get_fits_fn=get_fits_fn, cache_dir=None)
     mpicomm.Barrier()
     likelihood = get_likelihood(likelihoods_options=options['likelihoods'],
                                 cosmology_options=options['cosmology'], cache_dir=None)
     from desilike import compile
     from desilike.samples import Profiles, MCSamples
-    output_fns = list(get_fits_fn(kind='samples', **options).parent.glob('samples_*.h5'))
-    samples = [MCSamples.read(output_fn) for output_fn in output_fns]
-    qnames = ['qiso', 'qap']
-    means = MCSamples.concatenate([sample.remove_burnin(0.3) for sample in samples]).mean(qnames)
-    for sample, output_fn in zip(samples, output_fns):
-        if recenter:
-            for qname, mean in zip(qnames, means):
-                sample[qname] = sample[qname] - mean + 1.
-        if mpicomm.rank == 0:
-            sample.write(output_fn)
     output_fn = get_fits_fn(kind='profiles', **options)
     profiles = Profiles.read(output_fn)
+    qnames = ['qiso', 'qap']
     if recenter:
         # Hack to complement DR3 blinding
         for qname in qnames:
@@ -101,6 +93,15 @@ def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='
             for iobservable, observable in enumerate(sublikelihood.observables):
                 observable.plot(fn=plot_dir / f'plot_likelihood{ilikelihood}_observable{iobservable}.pdf')
                 observable.plot_bao(fn=plot_dir / f'plot_bao_likelihood{ilikelihood}_observable{iobservable}.pdf')
+    output_fns = list(get_fits_fn(kind='samples', **options).parent.glob('samples_*.h5'))
+    samples = [MCSamples.read(output_fn) for output_fn in output_fns]
+    means = MCSamples.concatenate([sample.remove_burnin(0.3) for sample in samples]).mean(qnames)
+    for sample, output_fn in zip(samples, output_fns):
+        if recenter:
+            for qname, mean in zip(qnames, means):
+                sample[qname] = sample[qname] - mean + 1.
+        if mpicomm.rank == 0:
+            sample.write(output_fn)
 
 
 if __name__ == '__main__':
@@ -114,8 +115,9 @@ if __name__ == '__main__':
 
     data = 'data-dr2-v1.1'
     recenter = True
-    #covariance = 'rascalc'
-    covariance = 'jaxpower'
+    covariance = 'rascalc'
+    #covariance = 'jaxpower'
 
     for tracer in ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'ELG2', 'QSO1']:
-        run_fit(actions=['profile', 'sample'], data=data, project=f'bao/centered_alpha/{data}' if recenter else f'bao/with_desi-clustering/{data}', tracer=tracer, stats_dir=stats_dir, fits_dir=fits_dir, recenter=recenter, covariance=covariance)
+        for region in ['GCcomb', 'NGC', 'SGC', 'GCcomb_noDES', 'GCcomb_noN', 'NGCnoN', 'SGCnoDES', 'N', 'S'][:1]:
+            run_fit(actions=['profile', 'sample'], data=data, project=f'bao/centered_alpha/{data}' if recenter else f'bao/with_desi-clustering/{data}', tracer=tracer, stats_dir=stats_dir, fits_dir=fits_dir, recenter=recenter, covariance=covariance, region=region)

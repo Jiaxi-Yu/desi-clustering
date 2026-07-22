@@ -74,10 +74,10 @@ def run_fit_from_options(actions,
         elif action == 'profile':
             profiler_options = dict(options['profiler'])
             cls = tools.get_profiler_cls(profiler_options.pop('profiler', 'minuit'))
-            likelihood_profiler = copy(likelihood)
-            for param in get_params(likelihood_profiler).select(solved=True):
+            profiler_likelihood = copy(likelihood)
+            for param in get_params(profiler_likelihood).select(solved=True):
                 param.update(derived='best')
-            posterior = compile(Posterior(likelihood_profiler, prior=get_prior(likelihood_profiler)))
+            posterior = compile(Posterior(profiler_likelihood, prior=get_prior(profiler_likelihood)))
             kw = dict(profiler_options.get('init', {}))
             kernel = cls(**{name: kw.pop(name) for name in list(kw) if name not in ['rng', 'rescale', 'covariance']})
             conditioner =  AffineConditioner(**{name: kw.pop(name, None) for name in ['rescale', 'covariance']})
@@ -97,7 +97,7 @@ def run_fit_from_options(actions,
                     if path.name != 'profiles.h5':
                         shutil.rmtree(path) if path.is_dir() else path.unlink()
             mpicomm.Barrier()
-            likelihood_sampler = copy(likelihood)
+            sampler_likelihood = copy(likelihood)
             if kw.get('rescale', False):
                 profiles = Profiles.read(profiles_fn).choice(index='argmax', squeeze=True)
                 if profiles.error is None:
@@ -107,7 +107,7 @@ def run_fit_from_options(actions,
                     best, error, covariance = profiles.best, profiles.error, profiles.covariance
                     kw['covariance'] = covariance
                     #error = {param: covariance.std(param) for param in covariance.names()}
-                    for param in get_params(likelihood_sampler):
+                    for param in get_params(sampler_likelihood):
                         if param.name in error:
                             param.update(ref=dict(dist='norm', loc=best[param.name], scale=error[param.name]))
             if kw.get('prior', None) is not None:
@@ -117,7 +117,7 @@ def run_fit_from_options(actions,
                     kw['prior'] = None
                 else:
                     kw['prior'] = kw['prior'] * profiles.covariance
-            posterior = compile(Posterior(likelihood_sampler, prior=get_prior(likelihood_sampler)))
+            posterior = compile(Posterior(sampler_likelihood, prior=get_prior(sampler_likelihood)))
             kernel = cls(**{name: kw.pop(name) for name in list(kw) if name not in ['rng', 'rescale', 'covariance', 'nparallel', 'prior', 'batch_size']})
             conditioner =  AffineConditioner(**{name: kw.pop(name, None) for name in ['rescale', 'covariance']})
             sampler = Sampler(posterior, kernel=kernel, output_dir=output_dir, conditioner=conditioner, **kw)
@@ -159,6 +159,10 @@ if __name__ == '__main__':
         help='Covariance mock set (default: holi-v3-altmtl).',
     )
     parser.add_argument(
+        '--covariance_scale', type=float, default=1.,
+        help='Positive multiplicative factor applied to the matched covariance matrix.',
+    )
+    parser.add_argument(
         '--project', type=str, default='',
         help='Optional measurement project subdirectory under stats_dir.',
     )
@@ -179,6 +183,7 @@ if __name__ == '__main__':
     for tracer in args.tracers:
         likelihood_options = generate_likelihood_options_helper(stats=args.stats, version=args.data, tracer=tracer, region=args.region,
                                                                 covariance=args.covariance, project=args.project)
+        likelihood_options['covariance']['scale'] = args.covariance_scale
         options['likelihoods'].append(likelihood_options)
     run_fit_from_options(args.actions,
                          get_fits_fn=functools.partial(tools.get_fits_fn, fits_dir=args.fits_dir),

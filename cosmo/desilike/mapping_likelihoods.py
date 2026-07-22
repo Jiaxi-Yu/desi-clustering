@@ -173,7 +173,7 @@ _SN_MAP = {
 # ---------------------------------------------------------------------------
 
 # Stat abbreviation → generate_likelihood_options_helper stats list
-_FS_STAT_ABBREVS = {
+_FS_STAT_SHORTS = {
     's2':         ['mesh2_spectrum'],
     's2-s3':      ['mesh2_spectrum', 'mesh3_spectrum'],
     's2-baor':    ['mesh2_spectrum', 'recon_bao'],
@@ -183,7 +183,9 @@ _FS_STAT_ABBREVS = {
 }
 
 # Individual tracer strings (used by the "all" variants)
-_FS_ALL_TRACERS = ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'LRG3xELG1', 'ELG2', 'QSO1']
+_FS_ALL_TRACERS = ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'ELG2', 'QSO1']
+_FS_SHORT_TRACERS = {'BGS1': 'bgs', 'LRG1': 'lrg1', 'LRG2': 'lrg2', 'LRG3': 'lrg3',
+                     'ELG2': 'elg2', 'QSO1': 'qso1'}
 
 # DR2 full-shape name → kwargs for generate_likelihood_options_helper.
 # Entries without a 'tracer' key represent the "all individual tracers" combination.
@@ -192,26 +194,23 @@ _FS_ALL_TRACERS = ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'LRG3xELG1', 'ELG2', 'QSO1']
 # 'theory' (merged into each observable's theory options), and 'covariance_options'
 # (merged into the covariance options).
 _FS_TRACERS = {}
-for _stat_abbrev, _stats in _FS_STAT_ABBREVS.items():
-    _FS_TRACERS[f'desi-dr2-fs-{_stat_abbrev}-all'] = {'stats': _stats}
-    for _short, _tracer in [('bgs', 'BGS1'), ('lrg-z1', 'LRG1'), ('lrg-z2', 'LRG2'),
-                             ('lrg-z3', 'LRG3'), ('lrgxelg', 'LRG3xELG1'),
-                             ('elg', 'ELG2'), ('qso', 'QSO1')]:
-        _FS_TRACERS[f'desi-dr2-fs-{_stat_abbrev}-{_short}'] = {'tracer': _tracer, 'stats': _stats}
+for _stat_short, _stats in _FS_STAT_SHORTS.items():
+    _FS_TRACERS[f'desi-dr2-fs-{_stat_short}-all'] = {'stats': _stats}
+    for _tracer in _FS_ALL_TRACERS:
+        _FS_TRACERS[f'desi-dr2-fs-{_stat_short}-{_FS_SHORT_TRACERS[_tracer]}'] = {'tracer': _tracer, 'stats': _stats}
 
 # Abacus-HF DR2 v2 mock full-shape likelihoods, replicating the setup of
 # full_shape/job_scripts/validation_systematic_templates.py with dataset
 # 'abacus-hf-dr2-v2-altmtl' (mean of mocks, holi-v3-altmtl mock covariance,
 # no systematic templates). BGS is not available in the Abacus-HF mocks;
 # _fs_likelihood_options falls back to the second-generation mocks for it.
-_ABACUS_FS_TRACERS = ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'ELG2', 'QSO1']
-_ABACUS_FS_SELECT = {
+_FS_SELECT = {
     'mesh2_spectrum': [{'ells': 0, 'k': [0.02, 0.20, 0.01]},
                        {'ells': 2, 'k': [0.02, 0.20, 0.01]}],
     'mesh3_spectrum': [{'ells': (0, 0, 0), 'k': [0.02, 0.20, 0.01]},
                        {'ells': (2, 0, 2), 'k': [0.02, 0.03, 0.01]}],
 }
-_ABACUS_FS_STATS_DIR = Path('/dvs_ro/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics')
+_FS_STATS_DIR = Path('/dvs_ro/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics')
 
 # Default cache for full-shape likelihoods (prepared stats + emulators), shared
 # with full_shape/job_scripts (e.g. validation_systematic_templates.py) so
@@ -227,20 +226,22 @@ DEFAULT_FS_CACHE_DIR = (Path(os.environ['SCRATCH']) / 'desi-clustering/full_shap
 DEFAULT_ACE_ENGINE = {'background': 'ACE_mnuw0wacdm_ln10As_basis',
                       'fourier': 'mnuw0wacdm_class',
                       'harmonic': 'capse_mnuw0wacdm_250001'}
-for _stat_abbrev in ['s2', 's2-s3']:
+for _stat_short in ['s2', 's2-s3']:
     for _theory in ['folpsD', 'comet']:
-        _FS_TRACERS[f'abacus-dr2-fs-{_stat_abbrev}-all-{_theory}'] = {
-            'stats': _FS_STAT_ABBREVS[_stat_abbrev],
-            'tracer': _ABACUS_FS_TRACERS,
+        _FS_TRACERS[f'abacus-dr2-fs-{_stat_short}-all-{_theory}'] = {
+            'stats': _FS_STAT_SHORTS[_stat_short],
+            'tracer': _FS_ALL_TRACERS,
             'version': 'abacus-hf-dr2-v2-altmtl',
             'covariance': 'holi-v3-altmtl',
-            'stats_dir': _ABACUS_FS_STATS_DIR,
+            'stats_dir': _FS_STATS_DIR,
             'project': 'full_shape/fiber_assignment_systematics',
             'emulator': _theory != 'comet',
-            'select': {stat: _ABACUS_FS_SELECT[stat] for stat in _FS_STAT_ABBREVS[_stat_abbrev]},
+            'select': {stat: _FS_SELECT[stat] for stat in _FS_STAT_SHORTS[_stat_short]},
             'theory': {'model': _theory, 'prior_basis': 'physical_aap'},
             'covariance_options': {'source': 'mock', 'project': 'full_shape/base'},
         }
+        for _tracer in _FS_ALL_TRACERS:
+            _FS_TRACERS[f'abacus-dr2-fs-{_stat_short}-{_FS_SHORT_TRACERS[_tracer]}-{_theory}'] = _FS_TRACERS[f'abacus-dr2-fs-{_stat_short}-all-{_theory}'] | dict(tracer=[_tracer])
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +661,10 @@ def get_likelihood(name, cosmo=None, **kwargs):
         # Prepared stats and emulators are cached under cache_dir (pass
         # cache_dir=None explicitly to disable caching and the emulator).
         cache_dir = kwargs.pop('cache_dir', DEFAULT_FS_CACHE_DIR)
+        from desilike.theories import ACECosmology
+        if isinstance(cosmo, ACECosmology):
+            # ACECosmology is already emulator-based (pure JAX): no theory emulator.
+            kwargs.setdefault('emulator', False)
         options = _fs_likelihood_options(name, cache_dir=cache_dir, **kwargs)
         cosmology_options = cosmo if cosmo is not None else options.get('cosmology')
         return _get_fs_likelihood(options['likelihoods'], cosmology_options=cosmology_options, cache_dir=cache_dir)

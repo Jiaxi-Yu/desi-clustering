@@ -314,6 +314,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             # random redshift-dependent columns are then resampled from the
             # shifted data rather than directly BAO-shifting the randoms.
             raw_data_unblinded = read_catalog(kind='data', **_catalog_options, concatenate=True)
+
             raw_data = catalog_bao_blinding.apply_to_catalogs(raw_data_unblinded, catalog_bao_blinding_options[tracer])
             bao_nz_reweight = None
             if catalog_bao_blinding_options[tracer] is not None and catalog_bao_blinding_options[tracer].get('apply_nz_reweight', True):
@@ -924,13 +925,25 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 window2 = types.read(window_fn)
                 # Fit bias parameters on the joint (P, B) data vector
                 theory = run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=window2)
+                types.ObservableTree([theory.data2, theory.data3, theory.spectrum2, theory.spectrum3], kind=['data2', 'data3', 'spectrum2', 'spectrum3']).write('debug_cov3/fit.h5')
+
+            # Reuse the covariance windows from a previous run when found on disk (they depend
+            # on the randoms and binning options only, not on the theory)
+            window_fns = {key: get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
+                          for key in ['window_covariance_mesh2_correlation', 'window_covariance_mesh3_correlation']}
+            windows = {}
+            if all(Path(fn).exists() for fn in window_fns.values()):
+                logger.info('Reusing covariance windows %s', [str(fn) for fn in window_fns.values()])
+                windows = {'window2': window_fns['window_covariance_mesh2_correlation'],
+                           'window3': window_fns['window_covariance_mesh3_correlation']}
 
             results = compute_covariance_mesh3_spectrum(functools.partial(get_data, tracer), spectrum2=spectrum2, spectrum3=spectrum3,
-                                                        theory=theory, shotnoise=shotnoise, fields=[simple_tracer], **covariance_options)
+                                                        theory=theory, shotnoise=shotnoise, fields=[simple_tracer], **windows, **covariance_options)
 
             def add_label(covariance):
                 # Label the two stacked (P, B) blocks with their observable kind and tracer(s)
-                observable = types.ObservableTree(list(covariance.observable), observables=['mesh2_spectrum', 'mesh3_spectrum'],
+                observable = types.ObservableTree(list(covariance.observable),
+                                                  observables=[tools.get_simple_stats(name) for name in ['mesh2_spectrum', 'mesh3_spectrum']],
                                                   tracers=covariance.observable.fields)
                 return covariance.clone(observable=observable)
 
@@ -940,10 +953,9 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 if key in results:
                     tools.write_stats(fn, add_label(results[key]))
 
-            # Write intermediate covariance-window correlation functions to disk
-            for key in results:
-                if 'correlation' in key:
-                    fn = get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
+            # Write intermediate covariance-window correlation functions to disk (unless reloaded)
+            if not windows:
+                for key, fn in window_fns.items():
                     tools.write_stats(fn, results[key])
 
 
@@ -1062,6 +1074,10 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
             # Combine measurements from different sky regions (NGC, SGC)
             combine_options = dict(options.get('combine_regions', {}))
             regions = combine_options.pop('regions', ['NGC', 'SGC'])
+            possible_regions = tools.possible_combine_regions(regions)
+            comb_regions = combine_options.pop('comb_regions', list(possible_regions))
+            assert all(comb_region in possible_regions for comb_region in comb_regions), f'Only these regions {list(possible_regions)} can be computed from {regions}'
+            comb_regions = {comb_region: possible_regions[comb_region] for comb_region in comb_regions}
             stats = combine_options.pop('stats', ['mesh2_spectrum', 'mesh3_spectrum'])
 
             def _combine_stats(stat, region_comb, regions, get_stats_fn=get_stats_fn, **options):
@@ -1086,7 +1102,7 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                             logger.info(f'Skipping {fn_comb} as {[fn for ex, fn in exists.items() if not ex]} do not exist')
 
             # Get all possible region combinations
-            for region_comb, regions in tools.possible_combine_regions(regions).items():
+            for region_comb, regions in comb_regions.items():
                 for stat in stats:
                     if 'window' in stat or 'covariance' in stat:
                         # Window and covariance don't need to loop over mocks

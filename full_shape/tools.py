@@ -82,8 +82,8 @@ def get_cosmology(cosmology_options: dict=None):
         Instance with configured priors.
     """
     from desilike import VariableCollection, Parameter
-    from desilike.theories import CosmoprimoCosmology
-    if isinstance(cosmology_options, CosmoprimoCosmology):
+    from desilike.theories import PrimordialCosmology, CosmoprimoCosmology
+    if isinstance(cosmology_options, PrimordialCosmology):  # already-constructed calculator (CosmoprimoCosmology, ACECosmology, ...)
         return cosmology_options
     cosmology_options = cosmology_options or {}
     model = cosmology_options.get('model', 'base_ns-fixed')
@@ -230,7 +230,7 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
             if recon: sigmapar, sigmaper = 6., 3.
         sigmas = {'sigmas': (2., 2.), 'sigmapar': (sigmapar, 2.), 'sigmaper': (sigmaper, 1.)}
         for name, value in sigmas.items():
-            configs[name] = {'prior': {'dist': 'norm', 'loc': value[0], 'scale': value[1], 'limits': [0., 20.]}}
+            configs[name] = {'value': value[0], 'prior': {'dist': 'norm', 'loc': value[0], 'scale': value[1], 'limits': [0., 20.]}}
         if marg:
             for param in params.select(basename=f'*l*_*'):
                 param.update(derived='marg')
@@ -327,7 +327,7 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
     from desilike.theories.galaxy_clustering import (DirectSpectrum2Template, ShapeFitSpectrum2Template, BAOSpectrum2Template,
         REPTVelocileptorsTracerSpectrum2Poles, FOLPSTracerSpectrum2Poles, FOLPSPTSpectrum2Poles,
         FOLPSTracerSpectrum3Poles, COMETPTSpectrum2Poles, COMETTracerSpectrum2Poles, COMETPTSpectrum3Poles, COMETTracerSpectrum3Poles,
-        DampedBAOWigglesTracerCorrelation2Poles, DampedBAOWigglesPTSpectrum2Poles)
+        DampedBAOWigglesTracerCorrelation2Poles, DampedBAOWigglesPTSpectrum2Poles, DampedBAOWigglesTracerSpectrum2Poles)
     from desilike.theories.galaxy_clustering.full_shape import get_physical_stochastic_settings
     from desilike.base import params as get_params
     theory_options = dict(theory_options)
@@ -386,14 +386,22 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
             theory = COMETTracerSpectrum3Poles(cosmo=cosmology, tracers=tracers, **kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
-    elif 'recon_particle2_correlation' in stat:
+    elif 'recon_' in stat:
         kw = {name: np.asarray(data_attrs.get(f'recon_{name}', None)).flat[0] for name in ['mode', 'smoothing_radius']}
         kw = kw | {name: theory_options[name] for name in kw if name in theory_options}
         if kw['mode'] is None: kw['mode'] = ''  # no reconstruction
-        kw['broadband'] = theory_options.get('broadband', 'pcs2')
-        theory = DampedBAOWigglesTracerCorrelation2Poles(template=template, **kw, ells=[0, 2, 4])
+        kw['ells'] = [0, 2, 4]
+        if stat == 'recon_particle2_correlation':
+            kw['broadband'] = theory_options.get('broadband', 'pcs2')
+            theory = DampedBAOWigglesTracerCorrelation2Poles(template=template, **kw)
+        elif stat == 'recon_mesh2_spectrum':
+            kw['broadband'] = theory_options.get('broadband', 'pcs')
+            theory = DampedBAOWigglesTracerSpectrum2Poles(template=template, **kw)
+        else:
+            raise NotImplementedError(f'cannot fit {stat}')
         # FIXME level=2
-        theory.update(params=update_theory_nuisance_priors(get_params(theory, level=2), theory_options['model'], stat, prior_basis=kw['mode'], tracer=tracers, marg=theory_options.get('marg', False), ells=getattr(data, 'ells', [0, 2, 4]), user_params=theory_options.get('params') or None))
+        params = update_theory_nuisance_priors(get_params(theory, level=2), theory_options['model'], stat, prior_basis=kw['mode'], tracer=tracers, marg=theory_options.get('marg', False), ells=getattr(data, 'ells', [0, 2, 4]), user_params=theory_options.get('params') or None)
+        theory.update(params=params)
     if theory is None:
         raise ValueError(f'theory not found for {stat} and {repr(theory_options)}')
     return theory
@@ -603,6 +611,8 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
           ``['hartlap', 'percival']``.
         - ``'nparams'``: effective parameter count for the Percival correction
           (inferred automatically when omitted).
+        - ``'scale'``: positive multiplicative factor for the final matched
+          covariance matrix.
 
         If ``None`` or ``{}``, the covariance-source dispatch falls through to ``None``
         and no covariance is built.
@@ -970,6 +980,7 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
         if not covariances:
             raise ValueError(f'no covariances found in {cov_fns}')
         covariance = combine_covariances(covariances, data)
+        #covariance = covariance.clone(value=covariance.value() / 25.)
         covariance.attrs['nobs'] = -1
     elif covariance_options.get('source') == 'mock':
         # Mock-based covariance
@@ -1041,6 +1052,15 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
             write_covariance_manifest_entry(cache_fn, imocks_exists)
 
     covariance = covariance.at.observable.match(data)
+
+    covariance_scale = float(covariance_options.get('scale', 1.))
+    if not np.isfinite(covariance_scale) or covariance_scale <= 0.:
+        raise ValueError(f'covariance scale must be positive and finite, got {covariance_scale!r}')
+    if covariance_scale != 1.:
+        covariance = covariance.clone(value=covariance.value() * covariance_scale)
+        if mpicomm.rank == 0:
+            logger.info(f'Applied covariance scale factor {covariance_scale:.6f}.')
+    covariance.attrs['covariance_scale'] = covariance_scale
 
     factor, metadata = _get_covariance_correction_factor(covariance, observables_options, covariance_options)
     if factor != 1.:
@@ -1544,6 +1564,7 @@ def generate_likelihood_options_helper(stats=('mesh2_spectrum', 'mesh3_spectrum'
     if isinstance(stats, str):
         stats = [stats]
     tracers = [tracer] if isinstance(tracer, (str, tuple)) else tracer
+    zranges = [zrange] if not isinstance(tracer[0], (tuple, list)) else zrange
     observables = []
     for tracer, stat in itertools.product(tracers, stats):
         tracer, zrange = get_full_tracer_zrange(tracer, zrange)

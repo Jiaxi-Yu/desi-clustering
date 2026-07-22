@@ -131,7 +131,7 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
     if zranges is None:
         zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
     options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, weight=weight, imock=imocks[0]), imocks=imocks,
-                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'particle2_correlation', 'particle3_correlation'][:4]},
+                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum', 'particle2_correlation', 'particle3_correlation'][:5]},
                    mesh2_spectrum={'cut': True, 'auw': True}, window_mesh2_spectrum={'cut': True},
                    mesh3_spectrum={'auw': True}, window_mesh3_spectrum={},
                    systematic_templates={'stats': ['mesh2_spectrum', 'mesh3_spectrum'], 'effects': ['auw', 'amr', 'ric']})
@@ -145,12 +145,13 @@ if __name__ == '__main__':
     check_for_existing_measurements = False
     stats, postprocess = [], []
     #version = 'abacus-hf-dr2-v2-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
+    version = 'glam-uchuu-v2-altmtl'
+    #version = 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN'
     #version = 'glam-uchuu-v2-altmtl-maskedfraczpNN'
     #version = ('glam-uchuu-v2-altmtl', 'glam-uchuu-v2-altmtl-maskedfraczpNN')
     #version = 'abacus-2ndgen-dr2-complete'
     #version = 'abacus-2ndgen-dr2-altmtl'
-    version = 'data-dr2-v2'
+    #version = 'data-dr2-v2'
     #version = 'data-dr2-test-maskedfracz'
     #version = 'data-dr2-test-maskedfraczpNN'
     analysis = 'full_shape'
@@ -175,17 +176,17 @@ if __name__ == '__main__':
 
     if 'glam-uchuu-v2-altmtl' in version:
         check_for_existing_measurements = False
-        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[:25]
-        imocks = [150]
+        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[1:25]
+        #imocks = [150]
 
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
-    tracers = ['BGS', 'LRG', 'ELG', 'QSO'] #[1:2]
+    #tracers = ['BGS', 'LRG', 'ELG', 'QSO'] #[1:2]
     #tracers = [('LRG', 'ELG')]
     #tracers = ['ELG', 'LRG'][:1]
-    #tracers = ['LRG']
-    #tracers = ['ELG', 'QSO'][:1]
+    #tracers = ['QSO']
+    tracers = ['ELG', 'QSO'][:1]
     #tracers = ['LRG', 'QSO']
     # run BGS
     #version = 'abacus-2ndgen-dr2-altmtl'
@@ -202,15 +203,19 @@ if __name__ == '__main__':
     #stats = ['particle2_correlation', 'particle3_correlation', 'close_pair_correction'][:2]
     #stats = ['particle2_correlation', 'close_pair_correction']
     #stats = ['particle2_correlation']
-    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction']
-    #stats = ['mesh3_spectrum', 'close_pair_correction']
-    #postprocess = ['combine_regions']
-    postprocess = ['systematic_templates']
+    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum']
+    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][2:]
+    #stats = ['window_mesh3_spectrum']
+    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:2]
+    stats = ['mesh2_spectrum', 'close_pair_correction'][:0]
+    postprocess = ['combine_regions']
+    #postprocess = ['systematic_templates']
     weight = 'default-FKP'
     #weight = 'default-FKP-bitwise-iip'
-    #weight = 'default-FKP'
+    #weight = 'default-nn-FKP'
     #weight = 'default-FKP-noimsys'
     #weight = 'default'
+    #regions = ['NGC', 'SGC']
     regions = ['NGC', 'SGC']
     #regions = ['SGCnoDES', 'DES']
     max_mocks_per_batch = 5
@@ -233,6 +238,7 @@ if __name__ == '__main__':
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+        #zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][3:]
 
         def get_run_stats():
             if mode == 'interactive':
@@ -251,18 +257,8 @@ if __name__ == '__main__':
                                                                                            region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
             imocks = exists[1]['imock']
         if True:
-            if any('window' in stat for stat in stats):
-                _imocks = imocks[:1]
-                nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
-                if nbatches >= 1:
-                    # Add dependence on other tasks
-                    get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
-            elif any('covariance' in stat for stat in stats):
-                get_run_stats()(imocks=[0], stats=stats, **run_stats_kws)
+            if any('covariance' in stat for stat in stats):
+                get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
             elif stats:
                 batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
                 for _imocks in batch_imocks:

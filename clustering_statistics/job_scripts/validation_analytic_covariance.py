@@ -115,17 +115,19 @@ if __name__ == '__main__':
 
     stats, postprocess = [], []
     version = 'holi-v3-altmtl'
+    #version = 'glam-uchuu-v2-altmtl'
     check_for_existing_measurements = False
 
     imocks = np.arange(25)
     #imocks = np.arange(5, 25)
     #imocks = np.arange(5, 9)
     #imocks = np.arange(1)
+    #imocks = [150]
     imocks = [0]
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
-    tracers = ['LRG', 'ELG', 'QSO']
+    tracers = ['LRG', 'ELG', 'QSO'][:1]
     #tracers = ['LRG']
     #tracers = ['QSO']
 
@@ -139,7 +141,8 @@ if __name__ == '__main__':
     #stats = ['recon_mesh2_spectrum', 'covariance_recon_mesh2_spectrum'][1:]
     #stats = ['recon_particle2_correlation', 'covariance_recon_particle2_correlation']
     #stats = ['covariance_recon_mesh2_spectrum', 'covariance_recon_particle2_correlation']
-    stats = ['mesh3_spectrum', 'covariance_mesh3_spectrum'][1:]
+    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'mesh3_spectrum', 'covariance_mesh3_spectrum']
+    stats = ['covariance_mesh3_spectrum']
     #stats = ['particle3_correlation']
     #stats = []
     postprocess = ['combine_regions'][:0]
@@ -147,7 +150,7 @@ if __name__ == '__main__':
     project = f'{analysis}/analytic_covariance_validation'
     weight = 'default-FKP'
     #weight = 'default'
-    regions = ['NGC', 'SGC']
+    regions = ['NGC', 'SGC'][:1]
     max_mocks_per_batch = 5
 
     onthefly = None
@@ -179,7 +182,7 @@ if __name__ == '__main__':
         run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, analysis=analysis, onthefly=onthefly, zranges=zranges, regions=regions, weight=weight, postprocess=postprocess)
         if True:
             if any('window' in stat or 'covariance' in stat for stat in stats):
-                _imocks = [0]
+                _imocks = imocks[:1]
                 nbatches = 1
                 tasks = []
                 for ibatch in range(nbatches):
@@ -189,7 +192,7 @@ if __name__ == '__main__':
                     # Add dependence on other tasks
                     get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
             elif any('covariance' in stat for stat in stats):
-                get_run_stats()(imocks=[0], stats=stats, **run_stats_kws)
+                get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
             elif stats:
                 batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) else []
                 for _imocks in batch_imocks:

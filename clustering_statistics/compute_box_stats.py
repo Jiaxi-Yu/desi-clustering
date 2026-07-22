@@ -247,7 +247,9 @@ def compute_box_stats_from_options(stats, cache=None,
 
         def add_label(covariance):
             # Label the two stacked (P, B) blocks with their observable kind and tracer(s)
-            observable = types.ObservableTree(list(covariance.observable), observables=['mesh2_spectrum', 'mesh3_spectrum'],
+            from .tools import get_simple_stats
+            observable = types.ObservableTree(list(covariance.observable),
+                                              observables=[get_simple_stats(name) for name in ['mesh2_spectrum', 'mesh3_spectrum']],
                                               tracers=[(simple_tracer,) * 2, (simple_tracer,) * 3])
             return covariance.clone(observable=observable)
 

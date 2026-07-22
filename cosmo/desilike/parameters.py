@@ -10,7 +10,7 @@ def get_fiducial():
     return _fiducial
 
 
-def get_cosmology(model=None, engine=None, parameterization='background', likelihoods=None):
+def get_cosmology(model=None, engine=None, parameterization='background', likelihoods=None, truncate_priors=False):
     """
     Construct and return a :mod:`desilike` :class:`CosmoprimoCosmology` calculator.
 
@@ -50,6 +50,15 @@ def get_cosmology(model=None, engine=None, parameterization='background', likeli
         Likelihood names. Drives the background-only branching described above,
         and frees ``N_ur`` when a ``'varied-nnu'``/``'marg-nnu'`` likelihood
         (or ``'schoneberg2024-bbn'``) is present.
+    truncate_priors : bool, optional
+        ACE engines only (ignored otherwise): intersect each parameter's prior
+        with the packaged emulators' training ranges (e.g. ``h`` in (0.5, 0.9),
+        ``omega_cdm`` in (0.08, 0.18)). Outside those ranges
+        :class:`~desilike.theories.primordial_cosmology.ACECosmology` NaN-masks
+        its results, which the :class:`~desilike.base.Posterior` maps to ``-inf``
+        — an effective prior truncation either way; enabling this makes it
+        explicit, so samplers drawing from the prior (e.g. pocomc) start every
+        particle at a finite log-likelihood. Default is ``False``.
 
     Returns
     -------
@@ -168,6 +177,12 @@ def get_cosmology(model=None, engine=None, parameterization='background', likeli
         params['wa_fld'].update(fixed=is_fixed_model)
     elif has_w0:
         params['w0_fld'].update(fixed=is_fixed_model)
+    if truncate_priors and (engine == 'ace' or isinstance(engine, dict)):
+        # Intersect the priors with the emulators' training ranges: outside them ACECosmology
+        # NaN-masks its results (mapped to -inf by the Posterior), so the priors are
+        # effectively truncated anyway — making it explicit keeps prior draws (e.g.
+        # pocomc's beta = 0 particles) at finite log-likelihood.
+        ACECosmology.truncate_priors(params, engine=engine)
     params.set(Parameter('H0', derived=True, latex='H_0'))
     if is_background:
         params.set(Parameter('omega_cdm', derived=True, latex=r'\omega_\mathrm{cdm}'))
