@@ -20,7 +20,9 @@ COSMO_MODELS = ['base', 'base_ns-fixed', 'fixed']
 PRIOR_BASES = ['physical', 'physical_aap', 'tcm_chudaykin_aap', 'standard']
 SAMPLERS = ['emcee', 'zeus', 'mhmcmc', 'nuts', 'pocomc', 'nautilus', 'numpyro_nuts', 'numpyro_barker']
 FOLPSD_DAMPINGS = ['exp', 'lor', 'vdg']
-FOLPSD_DAMPING_METHODS = ['none', 'tree', 'tree-gtns']
+FOLPSD_DAMPING_METHODS = [
+    'none', 'loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn', 'all',
+]
 BOX_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics/box')
 EZMOCK_STATS_DIR = Path('/dvs_ro/cfs/cdirs/desi/science/cai/desi-clustering/dr2/summary_statistics/mock_challenge/ezmock')
 FITS_DIR = Path(os.getenv('SCRATCH', '.')) / 'fits_box_mocks'
@@ -30,7 +32,7 @@ VERSION = 'abacus-hf-v2'
 ZSNAP = 1.475
 STATS = ('mesh2_spectrum', 'mesh3_spectrum')
 FOLPSD_DAMPING = 'vdg'
-FOLPSD_DAMPING_METHOD = 'tree'
+FOLPSD_DAMPING_METHOD = 'tree+loop'
 GELMAN_RUBIN = 1.03
 ESS = 700
 KRANGES = {

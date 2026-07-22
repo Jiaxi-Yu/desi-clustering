@@ -363,7 +363,7 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
             A_full = theory_options.get('A_full', True)
             pt = FOLPSPTSpectrum2Poles(A_full=A_full)
             if theory_options['model'] == 'folpsD':
-                theory_options.setdefault('damping_method', 'tree')
+                theory_options.setdefault('damping_method', 'tree+loop')
             kw = {name: theory_options[name] for name in ['damping', 'damping_method', 'prior_basis'] if name in theory_options}
             theory = FOLPSTracerSpectrum2Poles(template=template, pt=pt, tracers=tracers, **kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
@@ -1375,7 +1375,7 @@ def propose_fiducial_observable_options(stat, tracer=None, zrange=None):
                    'recon_bao': {}}
     base_full_shape_theory = {'model': 'folpsD', 'prior_basis': 'physical_aap', 'damping': 'vdg', 'marg': True}
     base_bao_theory = {'model': 'bao', 'broadband': 'pcs2', 'marg': True}
-    propose_theory = {'mesh2_spectrum': base_full_shape_theory | {'damping_method': 'tree', 'coevolution': '', 'A_full': False},
+    propose_theory = {'mesh2_spectrum': base_full_shape_theory | {'damping_method': 'tree+loop', 'coevolution': '', 'A_full': False},
                       'mesh3_spectrum': base_full_shape_theory | {'A_full': False},
                       'recon_particle2_correlation': base_bao_theory,
                       'recon_bao': {}}
@@ -1465,6 +1465,13 @@ def fill_fiducial_observable_options(options):
     options = fiducial_options | options
     for key, value in fiducial_options.items():
         options[key] = value | options[key]
+    # ``mesh2_spectrum`` defaults are defined for folpsD.  Once a caller
+    # selects another model, do not leak the folpsD-only damping settings back
+    # in on this or a subsequent fiducial-fill pass.
+    theory_options = options.get('theory', {})
+    if theory_options.get('model') != 'folpsD':
+        theory_options.pop('damping', None)
+        theory_options.pop('damping_method', None)
     return options
 
 
