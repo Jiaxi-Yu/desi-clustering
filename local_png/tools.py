@@ -182,6 +182,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
     if tracers[0] != tracers[1]:
         suffix = f'_{nickname}' if nickname is not None else ''
         for i, tt in enumerate(tracers):
+            logger.debug(f"Processing cross-correlation bias for {tt} in {tracer} (nickname={nickname})")
             if derived_cross_bias and (available_tracers is not None):
                 # if auto-tracer is available in available_tracers:
                 if 'x'.join([tt, tt]) in available_tracers:
@@ -193,6 +194,7 @@ def fix_likelihood_bias_and_damping(likelihood, tracer, zeffs, derived_cross_bia
                     default_tracer = sorted([tracer for tracer in available_tracers if tt in tracer.split('x')])[0]
                     if tracer == default_tracer:
                         logger.debug(f'This parameter is free ({tt}, {tracer}), and it will be used as default to link the other cross-correlation bias parameters.')
+                        all_params[f"{tt}{suffix}_ell0.b1"].update(value=1, fixed=False)  # let free it (useful in case it was fixed before...)
                     else:
                         logger.debug(f'This parameter is free ({tt}, {tracer}), but it will be linked to {default_tracer} bias parameters to break degeneracy, since auto-tracer data for {tt} is not available.')
                         zeff = [zeffs[default_tracer][0], zeffs[tracer][0]]
@@ -654,7 +656,14 @@ def build_total_likelihood(order, pks, observables, covs, zeffs, fiducial, scale
     for tracer in order: 
         # We do not link the damping term from the cross-correlation and the auto-correlation
         # Because they are different effective redshifts and we do not know the a priori.
-        fix_likelihood_bias_and_damping(total_likelihood, tracer=tracer, zeffs=zeffs, derived_cross_bias=True, nickname=tracer, available_tracers=order, bias_params=bias_params)
+
+        short_tts = tracer.replace('_zcmb', '').replace('notqso', '').split('x')
+        if short_tts[0] != short_tts[1]:
+            nickname = 'x'.join(short_tts)
+        else:
+            nickname = None
+
+        fix_likelihood_bias_and_damping(total_likelihood, tracer=tracer, zeffs=zeffs, derived_cross_bias=True, nickname=nickname, available_tracers=order, bias_params=bias_params)
 
     return total_likelihood
 
@@ -918,7 +927,14 @@ def run_profiling_one_mock(mocks, windows, covs, tracer, region='GCcomb', imock=
                 mocks_cov[tt] = [mm.match(pks[tt]) for mm in mocks_cov[tt]]
                 covariance = mocks_cov[tt]
 
-            obs[tt], lik[tt] = get_observable_and_likelihood(pks[tt], window, covariance, tt, zeffs, fix_fnl=False, nickname=tt, **kwargs)
+            tts = tt.split('x')
+            if tts[0] != tts[1]:
+                nickname = tt
+            else:
+                tts = tts[:1]
+                nickname = None
+
+            obs[tt], lik[tt] = get_observable_and_likelihood(pks[tt], window, covariance, 'x'.join(tts), zeffs, fix_fnl=False, nickname=nickname, **kwargs)
 
         if len(tracers) > 1:
             lik = build_total_likelihood(tracers, pks, obs, covs if analytical_covariance else mocks_cov, zeffs, fiducial)
