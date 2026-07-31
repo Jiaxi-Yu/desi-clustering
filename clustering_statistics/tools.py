@@ -565,7 +565,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['combine_window_mesh2_spectrum'] = {'effect': 'RIC+AMR', 'method': 'spline'}
 
     if "window_mesh2_spectrum_fm" in kind:
-        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
+        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LGExELG": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
 
         if simple_tracers[0] not in ["BGS", "LRG", "LGE", "ELG", "QSO"]:
             warnings.warn(f"tracer {tracer} is not supported for window_mesh2_spectrum_fm, skipping")
@@ -645,6 +645,15 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
                 amr_regions_zranges=list(itertools.product(propose_photoregions[simple_tracers[0]], propose_regression_zranges[simple_tracers[0]])),
             )
 
+    if "shotnoise_mesh2_spectrum_fm" in kind:
+        from copy import deepcopy
+
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"] = deepcopy(propose_fiducial["window_mesh2_spectrum_fm"])
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["batch_size"]
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["unitary_amplitude"]
+
+        propose_sigma = dict.fromkeys(["BGS", "LRG", "LGE", "ELG", "QSO"], 10.0) | dict.fromkeys(["LRGxLGE", "LRGxELG", "LRGxQSO", "ELGxQSO"], (10.0, 10.0))
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"].update(sigma=propose_sigma[simple_tracer])
     return propose_fiducial[kind]
 
 def _combine_tracer_catalogs(catalogs, nz_files, biases, P0, zmin, zmax, dz=0.01, kind='data', combine=None):
