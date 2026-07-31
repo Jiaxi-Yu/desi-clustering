@@ -47,7 +47,8 @@ from .spectrum2_tools import (
 )
 
 from .correlation3_tools import compute_particle3_angular_upweights, compute_particle3_correlation, compute_particle3_correlation_close_pair_correction
-from .spectrum3_tools import compute_mesh3_spectrum, compute_window_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction
+from .spectrum3_tools import (compute_mesh3_spectrum, compute_window_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction,
+                              compute_covariance_mesh3_spectrum, run_preliminary_fit_mesh3_spectrum)
 
 from .recon_tools import compute_reconstruction
 from .systematic_templates import include_systematic_templates
@@ -322,6 +323,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             # random redshift-dependent columns are then resampled from the
             # shifted data rather than directly BAO-shifting the randoms.
             raw_data_unblinded = read_catalog(kind='data', **_catalog_options, concatenate=True)
+
             raw_data = catalog_bao_blinding.apply_to_catalogs(raw_data_unblinded, catalog_bao_blinding_options[tracer])
             bao_nz_reweight = None
             if catalog_bao_blinding_options[tracer] is not None and catalog_bao_blinding_options[tracer].get('apply_nz_reweight', True):
@@ -449,7 +451,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             selection_weights = spectrum_options.get('selection_weights', None)
             _cache_auw = {}
 
-            def get_data(tracer):
+            def get_data(tracer, _cache_auw=_cache_auw):
                 # Load full parent catalogs (before any selection) for AUW computation
                 _catalog_options = dict(fn_catalog_options[tracer])
                 _zdata = zdata[tracer]
@@ -460,19 +462,19 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 del _zdata
                 toret = {}
                 for kind in ['fibered_data', 'parent_data'] + (['fibered_randoms', 'parent_randoms'] if npt > 2 else []):
-                    if kind not in _cache_auw:
+                    if (kind, tracer) not in _cache_auw:
                         if tracer not in raw_full_data:
                             raw_full_data[tracer] = read_catalog(kind='full_data', **_catalog_options, concatenate=True)
                             #_catalog_options['binned_weight'].update(raw_full_data[tracer].attrs)  # update binned weight info for AUW computation
                         if 'randoms' in kind:
-                            _cache_auw[kind] = prepare_catalog(raw_randoms[tracer], kind=kind, **_catalog_options)
+                            _cache_auw[kind, tracer] = prepare_catalog(raw_randoms[tracer], kind=kind, **_catalog_options)
                             if tools.check_if_requires_renormalization(**_catalog_options):
-                                for random in _cache_auw[kind]:
-                                    tools.renormalize_randoms_over_data(random, _cache_auw[kind.replace('randoms', 'data')], tracer=tracer)
+                                for random in _cache_auw[kind, tracer]:
+                                    tools.renormalize_randoms_over_data(random, _cache_auw[kind.replace('randoms', 'data'), tracer], tracer=tracer)
                         else:
-                            _cache_auw[kind] = prepare_catalog(raw_full_data[tracer], kind=kind, **_catalog_options)
+                            _cache_auw[kind, tracer] = prepare_catalog(raw_full_data[tracer], kind=kind, **_catalog_options)
 
-                    toret[kind] = _cache_auw[kind]
+                    toret[kind] = _cache_auw[kind, tracer]
                 return toret
 
             stats_npt = [stat for stat in stats if any(name in stat for name in [f'mesh{npt:d}', f'particle{npt:d}']) and options[stat].get('auw', False)]
@@ -933,6 +935,81 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                             fn = get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
                             tools.write_stats(fn, covariance[key])
 
+        # Joint 2-point + 3-point covariance. Unlike covariance_mesh2_spectrum, this only
+        # supports a single tracer: compute_covariance_mesh3_spectrum does not implement
+        # multi-tracer cross-covariance (it always labels both P and B with the same field).
+        stat = 'covariance_mesh3_spectrum'
+        if stat in stats:
+            assert len(tracers) == 1, f'{stat} only supports a single tracer, got {tracers}'
+            tracer = tracers[0]
+            simple_tracer = tools.get_simple_tracer(tracer)
+            covariance_options = dict(options[stat])
+            # theory is a python callable (P/B/T kernels at best-fit bias), not an lsstypes
+            # object: unlike covariance_mesh2_spectrum's theory, it is not written to disk.
+            theory = covariance_options.pop('theory', None)
+            shotnoise = covariance_options.pop('shotnoise', None)
+
+            def get_data(tracer):
+                czrandoms = Catalog.concatenate(zrandoms[tracer])
+                return {'data': zdata[tracer], 'randoms': czrandoms}
+
+            # Auto-detect the raw (no cut/auw) measured P(k), B(k1, k2): they set the covariance
+            # binning and, if theory is not provided, are fit to get the bias parameters.
+            spectrum2_fn = covariance_options.pop('spectrum2', None)
+            if spectrum2_fn is None:
+                kw = options['mesh2_spectrum'] | dict(auw=False, cut=False)
+                spectrum2_fn = get_stats_fn(kind='mesh2_spectrum', catalog=fn_catalog_options[tracer], **kw)
+            spectrum3_fn = covariance_options.pop('spectrum3', None)
+            if spectrum3_fn is None:
+                kw = options['mesh3_spectrum'] | dict(auw=False, cut=False)
+                spectrum3_fn = get_stats_fn(kind='mesh3_spectrum', catalog=fn_catalog_options[tracer], **kw)
+            spectrum2, spectrum3 = types.read(spectrum2_fn), types.read(spectrum3_fn)
+
+            if shotnoise is None:
+                # (1 + alpha) / nbar, read off the FKP monopole shot noise level
+                shotnoise = float(np.mean(spectrum2.get(spectrum2.ells[0]).values('shotnoise')))
+
+            if theory is None:
+                # Effective redshift: measured spectra carry no 'zeff' (only window matrices
+                # do); run_preliminary_fit_mesh3_spectrum reads it directly from window2.
+                window_fn = get_stats_fn(kind='window_mesh2_spectrum', catalog=fn_catalog_options[tracer],
+                                         **(options['window_mesh2_spectrum'] | dict(auw=False)))
+                window2 = types.read(window_fn)
+                # Fit bias parameters on the joint (P, B) data vector
+                theory = run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=window2)
+                types.ObservableTree([theory.data2, theory.data3, theory.spectrum2, theory.spectrum3], kind=['data2', 'data3', 'spectrum2', 'spectrum3']).write('debug_cov3/fit.h5')
+
+            # Reuse the covariance windows from a previous run when found on disk (they depend
+            # on the randoms and binning options only, not on the theory)
+            window_fns = {key: get_stats_fn(kind=key, catalog=fn_catalog_options, **(covariance_options | dict(auw=False, cut=False)))
+                          for key in ['window_covariance_mesh2_correlation', 'window_covariance_mesh3_correlation']}
+            windows = {}
+            if all(Path(fn).exists() for fn in window_fns.values()):
+                logger.info('Reusing covariance windows %s', [str(fn) for fn in window_fns.values()])
+                windows = {'window2': window_fns['window_covariance_mesh2_correlation'],
+                           'window3': window_fns['window_covariance_mesh3_correlation']}
+
+            results = compute_covariance_mesh3_spectrum(functools.partial(get_data, tracer), spectrum2=spectrum2, spectrum3=spectrum3,
+                                                        theory=theory, shotnoise=shotnoise, fields=[simple_tracer], **windows, **covariance_options)
+
+            def add_label(covariance):
+                # Label the two stacked (P, B) blocks with their observable kind and tracer(s)
+                observable = types.ObservableTree(list(covariance.observable),
+                                                  observables=[tools.get_simple_stats(name) for name in ['mesh2_spectrum', 'mesh3_spectrum']],
+                                                  tracers=covariance.observable.fields)
+                return covariance.clone(observable=observable)
+
+            # Write covariance matrix to disk
+            for key, kw in _expand_cut_auw_options(stat, covariance_options).items():
+                fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
+                if key in results:
+                    tools.write_stats(fn, add_label(results[key]))
+
+            # Write intermediate covariance-window correlation functions to disk (unless reloaded)
+            if not windows:
+                for key, fn in window_fns.items():
+                    tools.write_stats(fn, results[key])
+
 
 def list_stats(stats, get_stats_fn=tools.get_stats_fn, **kwargs):
     """
@@ -1049,6 +1126,10 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
             # Combine measurements from different sky regions (NGC, SGC)
             combine_options = dict(options.get('combine_regions', {}))
             regions = combine_options.pop('regions', ['NGC', 'SGC'])
+            possible_regions = tools.possible_combine_regions(regions)
+            comb_regions = combine_options.pop('comb_regions', list(possible_regions))
+            assert all(comb_region in possible_regions for comb_region in comb_regions), f'Only these regions {list(possible_regions)} can be computed from {regions}'
+            comb_regions = {comb_region: possible_regions[comb_region] for comb_region in comb_regions}
             stats = combine_options.pop('stats', ['mesh2_spectrum', 'mesh3_spectrum'])
 
             def _combine_stats(stat, region_comb, regions, get_stats_fn=get_stats_fn, **options):
@@ -1073,7 +1154,7 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                             logger.info(f'Skipping {fn_comb} as {[fn for ex, fn in exists.items() if not ex]} do not exist')
 
             # Get all possible region combinations
-            for region_comb, regions in tools.possible_combine_regions(regions).items():
+            for region_comb, regions in comb_regions.items():
                 for stat in stats:
                     if 'window' in stat or 'covariance' in stat:
                         # Window and covariance don't need to loop over mocks
@@ -1130,7 +1211,9 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                         if key == 'auw' and kw_window.get('cut', None):
                             effects = [effect for effect in effects if effect != 'auw']
                             continue
-                        if isinstance(fns, dict):
+                        if callable(fns):
+                            fns = fns(catalog=kw_window['catalog'], kind=stat, key=key)
+                        elif isinstance(fns, dict):
                             imocks = fns.get('imock', imocks)
                             fns = [get_stats_fn(kind=stat, **{**kw_window, 'imock': imock, 'auw': None, 'cut': None, **fns}) for imock in imocks]
                         if not isinstance(fns, (tuple, list)):
@@ -1188,54 +1271,6 @@ def postprocess_stats_from_options(postprocess, analysis='full_shape', get_stats
                 kw = options.get(kind_stat, {}) | dict(auw=False, cut=True)
                 fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
                 tools.write_stats(fn, rotation)
-
-
-def combine_stats_from_options(stats, region_comb, regions, get_stats_fn=tools.get_stats_fn, **kwargs):
-    """
-    Combine summary statistics from multiple regions based on the provided options.
-
-    Warning
-    --------
-    Use postprocess_from_options(['combine_regions']) instead.
-
-    Parameters
-    ----------
-    stats : str or list of str
-        Summary statistics to combine.
-    region_comb : str
-        Combined region name, e.g. 'GCcomb'.
-    regions : list of str
-        Regions to combine, e.g. ['NGC', 'SGC'].
-    get_stats_fn : callable, optional
-        Function to get the filename for storing the measurement.
-    **kwargs : dict
-        Options for catalog and summary statistics. For example:
-            catalog = dict(version='holi-v1-altmtl', tracer='LRG', zrange=[(0.4, 0.6), (0.8, 1.1)], imock=451)
-            mesh2_spectrum = dict(cut=True, auw=True, ells=(0, 2, 4), mattrs=dict(boxsize=7000., cellsize=8.))  # all arguments for compute_mesh2_spectrum
-            mesh3_spectrum = dict(basis='sugiyama-diagonal', ells=[(0, 0, 0)], mattrs=dict(boxsize=7000., cellsize=10.))  # all arguments for compute_mesh3_spectrum
-    """
-    warnings.warn("deprecated; use postprocess_from_options(['combine_regions']) instead")
-    options = fill_fiducial_options(kwargs)
-    regions = list(regions)
-    all_fns = {}
-    # List all measurement files for each region
-    for region in regions + [region_comb]:
-        kwargs = dict(options)
-        kwargs['catalog'] = {tracer: options['catalog'][tracer] | dict(region=region) for tracer in options['catalog']}
-        all_fns[region] = list_stats(stats, get_stats_fn=get_stats_fn, **kwargs)
-
-    stats = next(iter(all_fns.values())).keys()
-    # Combine each statistic
-    for stat in stats:
-        for ifn, (fn_comb, _) in enumerate(all_fns[region_comb][stat]):
-            fns = [all_fns[region][stat][ifn][0] for region in regions]  # [1] is kwargs
-            exists = {os.path.exists(fn): fn for fn in fns}
-            if all(exists):
-                # Read and combine measurements from different regions
-                combined = tools.combine_stats([types.read(fn) for fn in fns])
-                tools.write_stats(fn_comb, combined)
-            else:
-                logger.debug(f'Skipping {fn_comb} as {[fn for ex, fn in exists.items() if not ex]} do not exist')
 
 
 def main(**kwargs):

@@ -113,8 +113,10 @@ if __name__ == '__main__':
 
     # # glam-uchuu-v2-altmtl: 500-mock BAO covariance run (no jackknife)
     version = 'glam-uchuu-v2-altmtl'
-    imocks2run = np.arange(1000, 1500)
-    imocks2run = imocks2run[~np.isin(imocks2run, [280, 543, 1275])]  # skip dubious mocks
+    imocks2run = np.arange(1500)
+    good_imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance_v2.txt', dtype=int)
+    imocks2run = imocks2run[np.isin(imocks2run, good_imocks)]
+    # imocks2run = imocks2run[~np.isin(imocks2run, [280, 543, 1275])]  # skip dubious mocks
     jackknife = None
 
     # Per-tracer batch sizes (mocks per slurm task), sized to fit each task in the 3 h wall.
@@ -122,7 +124,7 @@ if __name__ == '__main__':
     max_mocks_per_batch_qso    = 25  # 25 * 6  ~= 150 min, in 3 h wall (30 min margin)
     max_mocks_per_batch_others = 5   # 5  * 28 ~= 140 min, in 3 h wall (40 min margin)
 
-    for tracer in ['LRG', 'ELG_LOPnotqso', 'QSO']:
+    for tracer in ['LRG+ELG_LOPnotqso']:#'LRG', 'ELG_LOPnotqso', 'QSO']:
         max_mocks_per_batch = max_mocks_per_batch_qso if tracer == 'QSO' else max_mocks_per_batch_others
         if True:
             exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer, region='NGC', version=version), test_if_readable=False, imock=imocks2run)[:2]

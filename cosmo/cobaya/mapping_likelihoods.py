@@ -341,18 +341,12 @@ BAO_LIKELIHOODS = {
     for name, metadata in BAO_DR2_DATASETS.items()
 }
 
-from cosmo.desilike.mapping_likelihoods import _FS_TRACERS as _desilike_FS_TRACERS
-FS_LIKELIHOODS = {
-    fs_name: {'family': 'fs', 'parameterization': 'lss'}
-    for fs_name in _desilike_FS_TRACERS
-}
 
 LIKELIHOOD_REGISTRY = {
     **BAO_LIKELIHOODS,
     **SN_LIKELIHOODS,
     **BBN_LIKELIHOODS,
     **CMB_LIKELIHOODS,
-    **FS_LIKELIHOODS,
 }
 
 

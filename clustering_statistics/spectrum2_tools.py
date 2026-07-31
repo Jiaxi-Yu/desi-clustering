@@ -14,6 +14,7 @@ import time
 import logging
 import functools
 import operator
+import itertools
 from collections.abc import Callable
 
 import numpy as np
@@ -585,9 +586,6 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
             # Main driver: loops over ell and calls compute(...)
             results = loop_over_optimal_weights(ells, compute, join)
 
-    # Return single result or dictionary of variants
-    if len(results) == 1:
-        return next(iter(results.values()))
     return results
 
 
@@ -2327,7 +2325,7 @@ def run_preliminary_fit_mesh2_spectrum(data: types.Mesh2SpectrumPoles, window: t
             params[name].update(**update)
 
     # Minimize likelihood to get best-fit theory
-    posterior = compile(Posterior(likelihood))    
+    posterior = compile(Posterior(likelihood))
     profiler = Profiler(posterior, kernel=Minuit(), rng=42)
     profiles = profiler.maximize()
     # Get best-fit parameters

@@ -31,8 +31,8 @@ output, error = 'slurm_outputs/abacus_mocks_recon/slurm-%j.out', 'slurm_outputs/
 kwargs = {}
 environ = Environment('nersc-cosmodesi')
 tm = TaskManager(queue=queue, environ=environ)
-tm_gpu = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='03:00:00',
-                            mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu'))
+# tm_gpu = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='03:00:00',
+                            # mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu'))
 tm80 = tm.clone(scheduler=dict(max_workers=10), provider=dict(provider='nersc', time='03:00:00',
                             mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g'))
 
@@ -113,7 +113,7 @@ if __name__ == '__main__':
     max_mocks_per_batch_qso    = 25
     max_mocks_per_batch_others = 5
 
-    for tracer in ['LRG', 'ELG_LOPnotqso', 'LRG+ELG_LOPnotqso', 'QSO']:
+    for tracer in ['LRG+ELG_LOPnotqso']:#'LRG', 'ELG_LOPnotqso', , 'QSO'
         max_mocks_per_batch = max_mocks_per_batch_qso if tracer == 'QSO' else max_mocks_per_batch_others
         if True:
             catalog_check_tracer = tracer.split('+')[0] if '+' in tracer else tracer
@@ -128,8 +128,8 @@ if __name__ == '__main__':
 
         def get_run_stats():
             _tm = tm80
-            if tracer in ['LRG']:
-                _tm = tm_gpu
+            # if tracer in ['LRG']:
+            #     _tm = tm_gpu
             return run_stats if mode == 'interactive' else _tm.python_app(run_stats)
 
         run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, stats=stats, analysis=analysis, onthefly=onthefly, postprocess=postprocess, jackknife=jackknife)

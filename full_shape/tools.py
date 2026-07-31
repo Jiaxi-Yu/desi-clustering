@@ -82,14 +82,14 @@ def get_cosmology(cosmology_options: dict=None):
         Instance with configured priors.
     """
     from desilike import VariableCollection, Parameter
-    from desilike.theories import CosmoprimoCosmology
-    if isinstance(cosmology_options, CosmoprimoCosmology):
+    from desilike.theories import PrimordialCosmology, CosmoprimoCosmology
+    if isinstance(cosmology_options, PrimordialCosmology):  # already-constructed calculator (CosmoprimoCosmology, ACECosmology, ...)
         return cosmology_options
     cosmology_options = cosmology_options or {}
     model = cosmology_options.get('model', 'base_ns-fixed')
     is_fixed_model = model == 'fixed'
     is_ns_fixed = is_fixed_model or 'ns-fixed' in model
-    has_w0wa = 'w0wa' in model
+    has_w0wa = any(w in model for w in ['w_wa', 'w0wa'])
     fiducial = get_fiducial()
 
     params = VariableCollection()
@@ -131,8 +131,8 @@ def get_cosmology(cosmology_options: dict=None):
                             ref=dict(dist='norm', loc=0., scale=0.3),
                             fd_eps=0.3, latex=r'w_a'))
     if is_fixed_model:
-        for name in params:
-            params[name].update(fixed=True)
+        for param in params:
+            param.update(fixed=True)
     params['n_s'].update(fixed=is_ns_fixed)
     if has_w0wa:
         params['w0_fld'].update(fixed=is_fixed_model)
@@ -230,7 +230,7 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
             if recon: sigmapar, sigmaper = 6., 3.
         sigmas = {'sigmas': (2., 2.), 'sigmapar': (sigmapar, 2.), 'sigmaper': (sigmaper, 1.)}
         for name, value in sigmas.items():
-            configs[name] = {'prior': {'dist': 'norm', 'loc': value[0], 'scale': value[1], 'limits': [0., 20.]}}
+            configs[name] = {'value': value[0], 'prior': {'dist': 'norm', 'loc': value[0], 'scale': value[1], 'limits': [0., 20.]}}
         if marg:
             for param in params.select(basename=f'*l*_*'):
                 param.update(derived='marg')
@@ -260,7 +260,7 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
                     'alpha2': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 50.}},
                     'alpha4': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 50.}},
                     'ct': {'value': 0., 'fixed': True, 'prior': {}},
-                    'X_FoG': {'value': 0., 'fixed': True, 'prior': {'dist': 'uniform', 'limits': [0, 10]}},
+                    'X_FoG': {'value': 0., 'fixed': True, 'prior': {'dist': 'uniform', 'limits': [0, 20]}},
                     'sn0': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 2.}},
                     'sn2': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 5.}},
                 })
@@ -275,14 +275,14 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
                     'c2': {'value': 0., 'fixed': True, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 20.}},
                     'sn0': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 2.}},
                     'snb0': {'value': 0., 'fixed': False, 'prior': {'dist': 'norm', 'loc': 0., 'scale': 1.}},
-                    'X_FoG': {'value': 0., 'fixed': True, 'prior': {'dist': 'uniform', 'limits': [0, 10]}},
+                    'X_FoG': {'value': 0., 'fixed': True, 'prior': {'dist': 'uniform', 'limits': [0, 20]}},
                 })
 
         # ── FoG damping ───────────────────────────────────────────────────
         if 'EFT' in model.upper():
             configs['X_FoG*'] = {'fixed': True}
         else:
-            configs['X_FoG*'] = {'fixed': False, 'prior': {'dist': 'uniform', 'limits': [0, 10]}}
+            configs['X_FoG*'] = {'fixed': False, 'prior': {'dist': 'uniform', 'limits': [0, 20]}}
         if marg:
             for param in params.select(basename=['alpha*', 'sn2', 'sn4']):
                 param.update(derived='marg')
@@ -327,7 +327,7 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
     from desilike.theories.galaxy_clustering import (DirectSpectrum2Template, ShapeFitSpectrum2Template, BAOSpectrum2Template,
         REPTVelocileptorsTracerSpectrum2Poles, FOLPSTracerSpectrum2Poles, FOLPSPTSpectrum2Poles,
         FOLPSTracerSpectrum3Poles, COMETPTSpectrum2Poles, COMETTracerSpectrum2Poles, COMETPTSpectrum3Poles, COMETTracerSpectrum3Poles,
-        DampedBAOWigglesTracerCorrelation2Poles, DampedBAOWigglesPTSpectrum2Poles)
+        DampedBAOWigglesTracerCorrelation2Poles, DampedBAOWigglesPTSpectrum2Poles, DampedBAOWigglesTracerSpectrum2Poles)
     from desilike.theories.galaxy_clustering.full_shape import get_physical_stochastic_settings
     from desilike.base import params as get_params
     theory_options = dict(theory_options)
@@ -362,7 +362,9 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
         elif theory_options['model'] in ['folpsD', 'folpsEFT']:
             A_full = theory_options.get('A_full', True)
             pt = FOLPSPTSpectrum2Poles(A_full=A_full)
-            kw = {name: theory_options[name] for name in ['damping', 'prior_basis'] if name in theory_options}
+            if theory_options['model'] == 'folpsD':
+                theory_options.setdefault('damping_method', 'tree+loop')
+            kw = {name: theory_options[name] for name in ['damping', 'damping_method', 'prior_basis'] if name in theory_options}
             theory = FOLPSTracerSpectrum2Poles(template=template, pt=pt, tracers=tracers, **kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
@@ -384,14 +386,22 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
             theory = COMETTracerSpectrum3Poles(cosmo=cosmology, tracers=tracers, **kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
-    elif 'recon_particle2_correlation' in stat:
+    elif 'recon_' in stat:
         kw = {name: np.asarray(data_attrs.get(f'recon_{name}', None)).flat[0] for name in ['mode', 'smoothing_radius']}
         kw = kw | {name: theory_options[name] for name in kw if name in theory_options}
         if kw['mode'] is None: kw['mode'] = ''  # no reconstruction
-        kw['broadband'] = theory_options.get('broadband', 'pcs2')
-        theory = DampedBAOWigglesTracerCorrelation2Poles(template=template, **kw, ells=[0, 2, 4])
+        kw['ells'] = [0, 2, 4]
+        if stat == 'recon_particle2_correlation':
+            kw['broadband'] = theory_options.get('broadband', 'pcs2')
+            theory = DampedBAOWigglesTracerCorrelation2Poles(template=template, **kw)
+        elif stat == 'recon_mesh2_spectrum':
+            kw['broadband'] = theory_options.get('broadband', 'pcs')
+            theory = DampedBAOWigglesTracerSpectrum2Poles(template=template, **kw)
+        else:
+            raise NotImplementedError(f'cannot fit {stat}')
         # FIXME level=2
-        theory.update(params=update_theory_nuisance_priors(get_params(theory, level=2), theory_options['model'], stat, prior_basis=kw['mode'], tracer=tracers, marg=theory_options.get('marg', False), ells=getattr(data, 'ells', [0, 2, 4]), user_params=theory_options.get('params') or None))
+        params = update_theory_nuisance_priors(get_params(theory, level=2), theory_options['model'], stat, prior_basis=kw['mode'], tracer=tracers, marg=theory_options.get('marg', False), ells=getattr(data, 'ells', [0, 2, 4]), user_params=theory_options.get('params') or None)
+        theory.update(params=params)
     if theory is None:
         raise ValueError(f'theory not found for {stat} and {repr(theory_options)}')
     return theory
@@ -540,9 +550,14 @@ def _get_covariance_correction_factor(covariance: types.CovarianceMatrix,
 
 
 def _get_prepared_cache_options(observables_options: list[dict], covariance_options: dict=None, kind: str=None):
+    def window_options(observable_options):
+        options = dict(observable_options.get('window', {}))
+        options.pop('theory_dk', None)
+        return options
+
     options = {'observables': [
         {name: dict(observable_options[name]) for name in ['stat', 'catalog']}
-        | ({'window': dict(observable_options['window'])} if 'window' in observable_options else {})
+        | ({'window': window_options(observable_options)} if 'window' in observable_options else {})
         for observable_options in observables_options
     ]}
     if kind == 'covariance':
@@ -596,6 +611,8 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
           ``['hartlap', 'percival']``.
         - ``'nparams'``: effective parameter count for the Percival correction
           (inferred automatically when omitted).
+        - ``'scale'``: positive multiplicative factor for the final matched
+          covariance matrix.
 
         If ``None`` or ``{}``, the covariance-source dispatch falls through to ``None``
         and no covariance is built.
@@ -688,17 +705,19 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
         return mpicomm.bcast(stats, root=0)
 
     # Helper: iterate over (stat, tracer) combinations
-    def iter_stat_tracer_combinations(observables_options, with_stat_kw=False):
+    def iter_stat_tracer_combinations(observables_options, with_stat_kw=False, catalog_options=None):
         """
         Yield (stat, labels, file_kwargs, observable_options) for each requested observable.
 
         Compact helper for iterating the user-provided observables and producing file kwargs
         and labeling information used when reading files.
         """
+        _catalog_options = dict(catalog_options or {})
         for observable_options in observables_options:
             stat = observable_options['stat']['kind']
-            tracers = _make_tuple(observable_options['catalog']['tracer'])
-            version = observable_options['catalog'].get('version', None)
+            catalog_options = observable_options['catalog'] | _catalog_options
+            tracers = _make_tuple(catalog_options['tracer'])
+            version = catalog_options.get('version', None)
             full_tracer = get_full_tracer(tracers, version=version)
             nfields = 3 if 'mesh3' in stat else 2
             simple_tracers = get_simple_tracer(tracers)
@@ -713,7 +732,7 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
                     kw[name] = observable_options['stat'][name]
                 elif with_stat_kw and name not in ['kind', 'select']:
                     kw[name] = observable_options['stat'][name]
-            file_kw = kw | observable_options['catalog'] | {'tracer': full_tracer}
+            file_kw = kw | catalog_options | {'tracer': full_tracer}
             yield stat, labels, file_kw, dict(observable_options)
 
     def _with_project(observable: types.ObservableTree):
@@ -907,10 +926,11 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
                     file_kw.pop('auw', None)  # auw stat has the same window as non-auw stat
                     window_options = {
                         key: value for key, value in observables_options[iobs].get('window', {}).items()
-                        if key != 'mode'
+                        if key not in ['mode', 'theory_dk']
                     }
                     file_kw = file_kw | window_options
-                    fn = _get_mock_stats_fn(f'window_{stat}', file_kw) if 'stats_dir' in file_kw else get_stats_fn(kind=f'window_{stat}', **file_kw)
+                    #fn = _get_mock_stats_fn(f'window_{stat}', file_kw) if 'stats_dir' in file_kw else get_stats_fn(kind=f'window_{stat}', **file_kw)
+                    fn = get_stats_fn(kind=f'window_{stat}', **file_kw)
                     logger.info(f"Reading window for {stat} from {fn}")
                     windows.append(types.read(fn))
             # Join mesh2_spectrum, mesh3_spectrum, etc.
@@ -960,6 +980,7 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
         if not covariances:
             raise ValueError(f'no covariances found in {cov_fns}')
         covariance = combine_covariances(covariances, data)
+        #covariance = covariance.clone(value=covariance.value() / 25.)
         covariance.attrs['nobs'] = -1
     elif covariance_options.get('source') == 'mock':
         # Mock-based covariance
@@ -978,7 +999,8 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
             all_fns = []
             covariance_log_patterns = []
             all_imocks = None
-            for stat, labels, file_kw, kw in iter_stat_tracer_combinations(observables_options):
+            covariance_labels = []
+            for stat, labels, file_kw, kw in iter_stat_tracer_combinations(observables_options, catalog_options=covariance_file_options):
                 file_kw = file_kw | {'imock': '*'} | covariance_file_options | covariance_stat_options.get(stat, {})
                 imocks = file_kw.pop('imock')
                 if imocks == '*':
@@ -1031,6 +1053,15 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
 
     covariance = covariance.at.observable.match(data)
 
+    covariance_scale = float(covariance_options.get('scale', 1.))
+    if not np.isfinite(covariance_scale) or covariance_scale <= 0.:
+        raise ValueError(f'covariance scale must be positive and finite, got {covariance_scale!r}')
+    if covariance_scale != 1.:
+        covariance = covariance.clone(value=covariance.value() * covariance_scale)
+        if mpicomm.rank == 0:
+            logger.info(f'Applied covariance scale factor {covariance_scale:.6f}.')
+    covariance.attrs['covariance_scale'] = covariance_scale
+
     factor, metadata = _get_covariance_correction_factor(covariance, observables_options, covariance_options)
     if factor != 1.:
         covariance = covariance.clone(value=covariance.value() * factor)
@@ -1063,8 +1094,39 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
     return likelihood
 
 
-def rebin_spectrum3_window(window, data=None):
-    """Rebin spectrum3 window. TBC"""
+def _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=None):
+    """Return the first-stage bispectrum theory-grid stride."""
+    ostep, tstep = float(ostep), float(tstep)
+    if not np.isfinite(ostep) or ostep <= 0.:
+        raise ValueError(f'Observable bispectrum spacing must be positive and finite; found {ostep}.')
+    if not np.isfinite(tstep) or tstep <= 0.:
+        raise ValueError(f'Native bispectrum theory spacing must be positive and finite; found {tstep}.')
+    if theory_dk is None:
+        rebin = int(ostep / tstep)
+    else:
+        theory_dk = float(theory_dk)
+        if not np.isfinite(theory_dk) or theory_dk <= 0.:
+            raise ValueError(f'Fixed bispectrum theory spacing must be positive and finite; found {theory_dk}.')
+        ratio = theory_dk / tstep
+        rebin = int(np.rint(ratio))
+        if ratio < 1. or rebin < 1:
+            raise ValueError(
+                f'Fixed bispectrum theory spacing {theory_dk} cannot be finer than the native spacing {tstep}.'
+            )
+        if not np.isclose(ratio, rebin, rtol=1e-6, atol=1e-8):
+            raise ValueError(
+                f'Fixed bispectrum theory spacing {theory_dk} must be an integer multiple '
+                f'of the native spacing {tstep}.'
+            )
+    if rebin < 1:
+        raise ValueError(
+            f'Observable bispectrum spacing {ostep} cannot be finer than the native theory spacing {tstep}.'
+        )
+    return rebin
+
+
+def rebin_spectrum3_window(window, data=None, theory_dk=None):
+    """Compact a bispectrum window, optionally using a fixed first-stage theory spacing."""
     if data is None:
         data = window.observable
     # Simplify window matrix
@@ -1073,8 +1135,13 @@ def rebin_spectrum3_window(window, data=None):
     window_theory = window.at.theory.get(types='theory') if with_templates else window
 
     tstep = min(np.diff(pole.edges('k'), axis=-1).min() for pole in window_theory.theory)
-    rebin = int(ostep / tstep)
-    assert rebin >= 1
+    rebin = _get_spectrum3_theory_rebin(ostep, tstep, theory_dk=theory_dk)
+    requested = 'dynamic' if theory_dk is None else f'{float(theory_dk):g}'
+    logger.info(
+        'Compactifying bispectrum window theory: observable dk=%g, native theory dk=%g, '
+        'requested theory dk=%s, first-stage stride=%d, effective theory dk=%g',
+        ostep, tstep, requested, rebin, rebin * tstep,
+    )
     window_theory = window_theory.at.theory.select(k=slice(0, None, rebin))
     # Compact non-diagonal term
     rebin = rebinning_matrix(window_theory.theory, new_coords=window_theory.theory.select(k=slice(0, None, 2)),
@@ -1185,7 +1252,8 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
             theory = get_theory(stat, theory_options=observable_options['theory'], cosmology=cosmology, data_attrs=data_attrs, data=data)
             if window is not None and cls == Spectrum3PolesObservable:
                 # Compactify window theory
-                window = rebin_spectrum3_window(window, data=data)
+                theory_dk = observable_options.get('window', {}).get('theory_dk', None)
+                window = rebin_spectrum3_window(window, data=data, theory_dk=theory_dk)
             if window is not None:
                 window = select_window_theory(window, data)
             templates = None
@@ -1198,7 +1266,7 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
                         assert mean.size == 1
                         prior = dict(dist='norm', loc=mean.flat[0], scale=sigma.flat[0])
                         param = Parameter(label['types'], namespace=namespace, value=mean.flat[0],
-                                        ref=prior, prior=prior, derived='best')
+                                        ref=prior, prior=prior) #, derived='best')
                         template = window.at.theory.get(**label).value()
                         templates.append((param, template[..., 0]))
                 window = window.at.theory.get('theory')  # window becomes the "standard window"
@@ -1208,18 +1276,29 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
             read_cache = cache_dir is not None and 'r' in cache_mode
             write_cache = cache_dir is not None and 'w' in cache_mode
             cache_dir = Path(cache_dir)
-            _hash = _hash_options({name: observable_options[name] for name in ['theory', 'catalog']})
+            emulator_cache_options = _get_emulator_cache_options(observable_options, observable=observable)
+            _hash = _hash_options(emulator_cache_options)
             _str_cosmology = str_from_cosmology_options(observable_options['theory']['cosmology'], level=100)
             _str_cosmology += '_' + observable_options['emulator']['name']
-            _str_theory = _str_from_observable_options(observable_options, level={'theory': 100, 'window': 0, 'catalog': 2})
+            _str_theory = _str_from_observable_options(
+                observable_options,
+                level={'stat': 2, 'theory': 100, 'window': 1, 'catalog': 2},
+            )
             cache_fn = cache_dir / f'emulator_{_str_cosmology}' / f'emulator_{_str_theory}_{_hash}.h5'
             from desilike.base import compile
             from desilike.emulators import TaylorEmulator
+            expected_theory_size = _get_emulator_theory_size(observable)
             if read_cache and cache_fn.exists():
-                logger.info(f'Reading cached emulator {cache_fn}')
+                msg = f'Reading cached emulator {cache_fn}'
+                if expected_theory_size is not None:
+                    msg += f' for {expected_theory_size} theory entries'
+                logger.info(msg)
                 emulator = TaylorEmulator.read(str(cache_fn))
             else:
-                logger.info(f'Fitting emulator {cache_fn}')
+                msg = f'Fitting emulator {cache_fn}'
+                if expected_theory_size is not None:
+                    msg += f' for {expected_theory_size} theory entries'
+                logger.info(msg)
                 pt_graph = compile(observable.theory if is_compressed else theory.pt)
                 emulator = TaylorEmulator(pt_graph, order=observable_options['emulator'].get('order', 3))
                 emulator.fit()
@@ -1314,9 +1393,9 @@ def propose_fiducial_observable_options(stat, tracer=None, zrange=None):
                                         'basis': 'sugiyama-diagonal'},
                    'recon_particle2_correlation': {'select': [{'ells': ell, 's': [60., 150., 4.]} for ell in [0, 2]]},
                    'recon_bao': {}}
-    base_full_shape_theory = {'model': 'folpsD', 'prior_basis': 'physical_aap', 'damping': 'lor', 'marg': True}
+    base_full_shape_theory = {'model': 'folpsD', 'prior_basis': 'physical_aap', 'damping': 'vdg', 'marg': True}
     base_bao_theory = {'model': 'bao', 'broadband': 'pcs2', 'marg': True}
-    propose_theory = {'mesh2_spectrum': base_full_shape_theory | {'coevolution': '', 'A_full': False},
+    propose_theory = {'mesh2_spectrum': base_full_shape_theory | {'damping_method': 'tree+loop', 'coevolution': '', 'A_full': False},
                       'mesh3_spectrum': base_full_shape_theory | {'A_full': False},
                       'recon_particle2_correlation': base_bao_theory,
                       'recon_bao': {}}
@@ -1406,6 +1485,13 @@ def fill_fiducial_observable_options(options):
     options = fiducial_options | options
     for key, value in fiducial_options.items():
         options[key] = value | options[key]
+    # ``mesh2_spectrum`` defaults are defined for folpsD.  Once a caller
+    # selects another model, do not leak the folpsD-only damping settings back
+    # in on this or a subsequent fiducial-fill pass.
+    theory_options = options.get('theory', {})
+    if theory_options.get('model') != 'folpsD':
+        theory_options.pop('damping', None)
+        theory_options.pop('damping_method', None)
     return options
 
 
@@ -1478,6 +1564,7 @@ def generate_likelihood_options_helper(stats=('mesh2_spectrum', 'mesh3_spectrum'
     if isinstance(stats, str):
         stats = [stats]
     tracers = [tracer] if isinstance(tracer, (str, tuple)) else tracer
+    zranges = [zrange] if not isinstance(tracer[0], (tuple, list)) else zrange
     observables = []
     for tracer, stat in itertools.product(tracers, stats):
         tracer, zrange = get_full_tracer_zrange(tracer, zrange)
@@ -1573,6 +1660,61 @@ def _base_type_options(options):
             return v
         return str(v)
     return convert(options)
+
+
+def _get_emulator_theory_grid_signature(observable):
+    """Return a cache-stable description of the initialized observable theory grid."""
+    window = getattr(observable, 'window', None)
+    theory = getattr(window, 'theory', None)
+    if theory is None:
+        theory = getattr(observable, 'theory', None)
+    if theory is None:
+        return None
+    if hasattr(theory, 'items'):
+        leaves = []
+        for label, leaf in theory.items(level=None):
+            coords = {}
+            for coord_name in leaf.coords():
+                coords[coord_name] = np.asarray(leaf.coords(coord_name))
+            leaves.append({'label': dict(label), 'coords': coords})
+        return leaves
+    signature = {}
+    for name in ['k', 's', 'ells']:
+        if hasattr(theory, name):
+            signature[name] = getattr(theory, name)
+    return signature or None
+
+
+def _get_emulator_theory_size(observable):
+    window = getattr(observable, 'window', None)
+    theory = getattr(window, 'theory', None)
+    if theory is not None and hasattr(theory, 'size'):
+        return int(theory.size)
+    flatdata = getattr(observable, 'flatdata', None)
+    if flatdata is not None:
+        return int(np.size(flatdata))
+    return None
+
+
+def _get_emulator_cache_options(observable_options, observable=None):
+    """Return options that define the reusable Taylor-emulator domain."""
+    options = {
+        name: observable_options[name]
+        for name in ['stat', 'catalog', 'emulator']
+        if name in observable_options
+    }
+    if 'theory' in observable_options:
+        theory_options = dict(observable_options['theory'])
+        theory_options.pop('damping', None)
+        theory_options.pop('damping_method', None)
+        options['theory'] = theory_options
+    if 'window' in observable_options:
+        options['window'] = observable_options['window']
+    if observable is not None:
+        grid = _get_emulator_theory_grid_signature(observable)
+        if grid is not None:
+            options['theory_grid'] = grid
+    return options
 
 
 def _hash_options(options, length=8):

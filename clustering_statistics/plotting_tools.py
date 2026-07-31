@@ -42,6 +42,7 @@ def get_means_covs(kind, versions, tracer, zrange, region, stats_dir, project=''
     for version in versions:
         use_theory  = versions[version].get('theory',False)
         use_dubious =  versions[version].get('include_dubious',False)
+        tracer = versions[version].get('tracer',tracer) # try to use tracer provided in dictionary. Useful for when tracer names do not match, e.g., BGS_BRIGHT-21.35 vs BGS_BRIGHT.
         if use_theory:
             kind = 'theory_'+kind_
             if 'mesh3' in kind or 'particle2' in kind:

@@ -4,6 +4,7 @@ To run on NERSC, use the following commands:
 ```bash
 salloc -N 1 -C "gpu&hbm80g" -t 04:00:00 --gpus 4 --qos interactive --account desi_g
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
+export PYTHONPATH=$HOME/LSScode/dr2-clustering-analysis/:$PYTHONPATH
 srun -n 4 python interactive_job.py
 ```
 """
@@ -47,16 +48,29 @@ def run_stats(tracer='LRG', project='', version='holi-v3-altmtl', onthefly=None,
     for imock in imocks:
         for region in regions:
             t0 = time()
-            mesh2_spectrum = {}
-            # To get angular upweights and/or get the theta cut uncomment below
-            # mesh2_spectrum = {'cut': True if 'shape' in analysis else None, 
-            #                   'auw': True if 'altmtl' in version and onthefly is None and 'shape' in analysis else None}
-            window_mesh2_spectrum = {'cut': True if 'shape' in analysis else None}
-            
-            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock), 
+            correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
+            auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
+            cut = correction
+            mesh2_spectrum = {'cut': cut, 'auw': auw}
+            window_mesh2_spectrum = {'cut': cut}
+            mesh3_spectrum = {'auw': auw}
+            window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
+            mode = 'smu'
+            if mode == 'smu':
+                particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 40., 41), mu=(np.linspace(-1., 1., 201), 'midpoint'))}
+                particle3_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 20., 21), pole=(list(range(6)), 'firstpoint'))}
+            elif mode == 'theta':
+                particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(theta=np.linspace(0., 0.3, 31))}
+                particle3_correlation = {'split_randoms': (2., 10), 'battrs': dict(theta=np.linspace(0., 0.3, 31))}
+            particle2_correlation |= {'auw': auw}
+            particle2_correlation |= {'jackknife': {'nsplits': 60}} if do_jackknife else {}
+            particle3_correlation |= {'auw': auw}
+            #particle3_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 20., 21), pole=(list(range(6)), 'firstpoint'))}
+            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock),
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
-                           particle2_correlation={'jackknife': {'nsplits': 60}} if do_jackknife else {},
-                           window_mesh3_spectrum={'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch})
+                           mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
+                           particle2_correlation=particle2_correlation,
+                           particle3_correlation=particle3_correlation)
             options = fill_fiducial_options(options, analysis=analysis)
             
             for itracer in options['catalog']:
@@ -113,51 +127,67 @@ if __name__ == '__main__':
     # version  = 'holi-v3-altmtl'
     # version  = 'holi-bgs-altmtl'
     # version  = 'abacus-hf-dr2-v2-altmtl'
+    # version = 'abacus-2ndgen-dr2-altmtl'
     # version = 'uchuu-hf-reference'
-    version = 'uchuu-hf-altmtl'
+    # version = 'uchuu-hf-altmtl'
     # version = 'abacus-hf-dr2-v1'
-    check_for_existing_measurements = False
-    
+    # version = 'holi-v4-altmtl'
+    # version = 'glam-uchuu-v2-altmtl-maskedfraczpNN'
+    version = 'holi-v4-altmtl-NN'
+    check_for_existing_measurements = True
+
     # test run 
     # imocks2run = 150 + np.arange(1)
     # imocks2run = np.arange(1)
-    imocks2run = np.arange(25)
-    stats_dir  = Path(os.getenv('SCRATCH')) / 'cai-dr2-benchmarks' 
-    
-    # official run
-    # imocks2run = 150 + np.arange(50)
     # imocks2run = np.arange(25)
-    # imocks2run = np.arange(50)
+    # stats_dir  = Path(os.getenv('SCRATCH')) / 'cai-dr2-benchmarks' 
+
+    # official run
+    # imocks2run = [150] + np.arange(50)
+    imocks2run = np.arange(1)
+    # imocks2run = np.arange(1,500)
+    # imocks2run = np.arange(500,1000)
     # if version == 'holi-v3-altmtl':
     #     # do not perform measurements on dubious mocks
     #     bad_imocks = np.loadtxt('../helper_scripts/dubious_holi-v3-altmtl.txt',dtype=int)
     #     imocks2run = imocks2run[~np.isin(imocks2run,bad_imocks)]
-    # stats_dir  = tools.base_stats_dir
+    #if version == 'glam-uchuu-v2-altmtl':
+        # imocks2run = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)
+    #    good_imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance_v2.txt', dtype=int)
+    #    imocks2run = imocks2run[np.isin(imocks2run, good_imocks)]
+    stats_dir  = tools.base_stats_dir
 
     # run fiducial full_shape
-    # stats       = ['mesh2_spectrum']#, 'mesh3_spectrum', 'particle2_correlation']
+    # stats       = ['mesh2_spectrum']#, 'particle2_correlation']
     # stats       = ['mesh3_spectrum', 'window_mesh3_spectrum']
-    stats = ['mesh2_spectrum', 'mesh3_spectrum']
+    stats = ['mesh2_spectrum', 'mesh3_spectrum',
+             'window_mesh2_spectrum', 'window_mesh3_spectrum', 
+             'covariance_mesh2_spectrum', 'covariance_mesh3_spectrum']
+    # stats = ['mesh2_spectrum','mesh3_spectrum']
     postprocess = ['combine_regions']
     analysis = 'full_shape'
-    project  = f'{analysis}/base'
+    project = f'{analysis}/base'
+    #project  = f'{analysis}/base'
     weight   = 'default-FKP'
     # weight   = 'default'
     regions  = ['NGC','SGC']
     # regions = ['NGC','SGC','N','NGCnoN','S','SGCnoDES','SnoDES','DES','ACT_DR6','PLANCK_PR4','GAL040','GAL060']
     # tracers  = ['LRG', 'ELG_LOPnotqso', 'QSO']
-    tracers  = ['QSO']
+    tracers  = ['ELG_LOPnotqso']
     # tracers  = ['BGS_BRIGHT-21.35']
+    #tracers = ['BGS_BRIGHT-02']
     max_mocks_per_batch = 1
 
     # run data_splits for lensing group with full_shape setup 
     # stats   = ['mesh2_spectrum']
+    # postprocess = ['combine_regions']
     # analysis = 'full_shape'
     # project = f'{analysis}/data_splits'
     # weight  = 'default-FKP'
     # regions = ['N','NGCnoN','S','SGCnoDES','SnoDES','DES','ACT_DR6','PLANCK_PR4','GAL040','GAL060']
+    # regions = ['GCcomb_noN', 'GCcomb_noDES']
     # tracers  = ['LRG', 'ELG_LOPnotqso', 'QSO']
-    # max_mocks_per_batch = 1 
+    # imax_mocks_per_batch = 1 
 
     # run fiducial local_png
     # stats       = ['mesh2_spectrum']
@@ -175,32 +205,39 @@ if __name__ == '__main__':
     # onthefly = 'reshuffle'
     onthefly = None
     do_jackknife = False
-    
+
     for tracer in tracers:
         if 'png' in analysis:
             # do not compute measurements for overlapping redshifts
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
+            #if 'QSO' == tracer:
+            #    zranges = [(0.8,1.6),(1.6,2.1)] 
+            #else:
+            #    zranges = [(0.8,1.6)]
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+
         if check_for_existing_measurements:
             exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer,
                                                                                            region='NGC', version=version), test_if_readable=False, imock=imocks2run)[:2]
             imocks = exists[1]['imock']
+            # print(tools.get_catalog_fn(tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer, region='NGC', version=version, imock=imocks2run[0]))
+            # print(imocks)
             rerun = []
             for zrange in zranges:
                 for kind in stats:
                     stats_kws = dict(basis='sugiyama-diagonal', kind=kind, stats_dir=Path(str(stats_dir).replace('global','dvs_ro')),
-                                     tracer=tracer, region=regions[-1], weight=weight, zrange=zrange, version=version, project=project, 
+                                     tracer=tracer, region=regions[-1], weight=weight, zrange=zrange, version=version, project=project,
                                      extra=onthefly if onthefly else '')
                     rexists, missing, unreadable = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_stats_fn, **stats_kws), test_if_readable=True, imock=imocks2run)
                     rerun += [imock for imock in imocks if (imock in unreadable[1]['imock']) or (imock not in rexists[1]['imock'])]
             imocks = sorted(set(rerun))
         else:
             imocks = imocks2run
-            
+        
         run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, stats=stats, analysis=analysis, onthefly=onthefly, zranges=zranges, do_jackknife=do_jackknife, regions=regions, weight=weight, postprocess=postprocess)
         batch_imocks = np.array_split(imocks, max(len(imocks) // max_mocks_per_batch, 1)) if len(imocks) else []
         for _imocks in batch_imocks:
             run_stats(imocks=_imocks, **run_stats_kws)
-        # if postprocess:
-        #     postprocess_stats(imocks=imocks, **run_stats_kws)
+        #if postprocess:
+        #   postprocess_stats(imocks=imocks, **run_stats_kws)

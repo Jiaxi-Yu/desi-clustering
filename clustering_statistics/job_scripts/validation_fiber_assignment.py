@@ -27,7 +27,7 @@ mode = 'interactive'
 #mode = 'slurm'
 
 if mode == 'slurm':
-    queue = Queue('abacus_mocks5')
+    queue = Queue('abacus_mocks2')
     queue.clear(kill=False)
 
     output, error = 'slurm_outputs/abacus_mocks/slurm-%j.out', 'slurm_outputs/abacus_mocks/slurm-%j.err'
@@ -36,9 +36,9 @@ if mode == 'slurm':
     tm = TaskManager(queue=queue, environ=environ)
     tm = tm.clone(scheduler=dict(max_workers=20), provider=dict(provider='nersc', time='03:00:00',
                                 mpiprocs_per_worker=4, output=output, error=error, constraint='gpu'))
-    tm80 = tm.clone(provider=dict(provider='nersc', time='03:00:00',
-                                mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g'))
-    tmw = tm.clone(scheduler=dict(max_workers=1), provider=dict(provider='nersc', time='00:10:00',
+    tm80 = tm.clone(provider=dict(provider='nersc', time='10:00:00',
+                                mpiprocs_per_worker=4, output=output, error=error, constraint='gpu&hbm80g'))
+    tmw = tm.clone(scheduler=dict(max_workers=1), provider=dict(provider='nersc', time='10:00:00',
                     mpiprocs_per_worker=2250, nodes_per_worker=25, output=output, error=error, stop_after=1, constraint='cpu'))
 
 
@@ -52,7 +52,6 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
-    import sys
     import functools
     from pathlib import Path
     import jax
@@ -63,7 +62,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
     try: jax.distributed.initialize()
     except RuntimeError: print('Distributed environment already initialized')
     else: print('Initializing distributed environment')
-    from clustering_statistics import tools, setup_logging, compute_stats_from_options, fill_fiducial_options, postprocess_stats_from_options
+    from clustering_statistics import tools, setup_logging, compute_stats_from_options, fill_fiducial_options
     setup_logging()
 
     cache = {}
@@ -96,11 +95,13 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             options = fill_fiducial_options(options, analysis=analysis)
 
             for itracer in options['catalog']:
-                #options['catalog'][itracer]['nran'] = 5
+                #options['recon'][itracer]['nran'] = 18
+                #options['catalog'][itracer]['nran'] = 18
                 #if 'BGS_BRIGHT' in itracer:
                 #    options['catalog'][itracer]['tracer'] = 'BGS_BRIGHT'
                 options['catalog'][itracer]['zranges'] = zranges # override fiducial zranges
-                options['catalog'][itracer]['expand'] = {'parent_randoms_fn': tools.get_catalog_fn(kind='parent_randoms', version='data-dr2-v2', tracer=itracer, nran=options['catalog'][itracer]['nran'])}
+                if 'data' not in version:
+                    options['catalog'][itracer]['expand'] = {'parent_randoms_fn': tools.get_catalog_fn(kind='parent_randoms', version='data-dr2-v2', tracer=itracer, nran=options['catalog'][itracer]['nran'])}
                 if onthefly is not None and onthefly.startswith('complete'):
                     options['catalog'][itracer]['complete'] = {'with_completeness': 'nocomp' not in onthefly, 'with_tracer_cuts': True}
                 elif onthefly is not None and onthefly.startswith('altmtl'):
@@ -130,11 +131,10 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
     if zranges is None:
         zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
     options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, weight=weight, imock=imocks[0]), imocks=imocks,
-                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'particle2_correlation', 'particle3_correlation']},
+                   combine_regions={'stats': ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum', 'covariance_mesh2_spectrum', 'particle2_correlation', 'particle3_correlation'][:5]},
                    mesh2_spectrum={'cut': True, 'auw': True}, window_mesh2_spectrum={'cut': True},
                    mesh3_spectrum={'auw': True}, window_mesh3_spectrum={},
-                   systematic_templates={'stats': ['mesh2_spectrum', 'mesh3_spectrum'], 'effects': ['auw'],
-                                        'templates': {'auw': {'extra': 'auw'}, 'raw': {}}})
+                   systematic_templates={'stats': ['mesh2_spectrum', 'mesh3_spectrum'], 'effects': ['auw', 'amr', 'ric']})
     _get_stats_fn = functools.partial(get_stats_fn, stats_dir=stats_dir, project=project, onthefly=onthefly)
     postprocess_stats_from_options(postprocess, analysis=analysis, get_stats_fn=_get_stats_fn, **options)
 
@@ -145,9 +145,10 @@ if __name__ == '__main__':
     check_for_existing_measurements = False
     stats, postprocess = [], []
     #version = 'abacus-hf-dr2-v2-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
-    version = 'abacus-hf-dr2-v2-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
+    version = 'glam-uchuu-v2-altmtl'
+    #version = 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN'
+    #version = 'glam-uchuu-v2-altmtl-maskedfraczpNN'
+    #version = ('glam-uchuu-v2-altmtl', 'glam-uchuu-v2-altmtl-maskedfraczpNN')
     #version = 'abacus-2ndgen-dr2-complete'
     #version = 'abacus-2ndgen-dr2-altmtl'
     #version = 'data-dr2-v2'
@@ -163,7 +164,8 @@ if __name__ == '__main__':
     project = f'{analysis}/fiber_assignment_systematics'
     #project = f'{analysis}/fiber_assignment_systematics_tests'
     #project = f'{analysis}/fiber_assignment_systematics_ELG_{compweight}'
-    imocks = np.arange(10)
+    imocks = np.arange(25)
+    #imocks = np.arange(3, 9)
     #imocks = np.arange(14, 25)
     #imocks = np.arange(12, 25)
     #imocks = np.arange(5, 9)
@@ -172,18 +174,19 @@ if __name__ == '__main__':
     if 'data' in version:
         imocks = [None]
 
-    if version == 'glam-uchuu-v2-altmtl':
+    if 'glam-uchuu-v2-altmtl' in version:
         check_for_existing_measurements = False
-        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[:25]
+        imocks = np.loadtxt('../helper_scripts/glam-uchuu-v2-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[1:25]
         #imocks = [150]
 
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
-    tracers = ['BGS', 'LRG', 'ELG', 'QSO'][1:]
-    #tracers = ['ELG', 'LRG']
-    #tracers = ['LRG']
-    #tracers = ['ELG', 'QSO'][:1]
+    #tracers = ['BGS', 'LRG', 'ELG', 'QSO'] #[1:2]
+    #tracers = [('LRG', 'ELG')]
+    #tracers = ['ELG', 'LRG'][:1]
+    #tracers = ['QSO']
+    tracers = ['ELG', 'QSO'][:1]
     #tracers = ['LRG', 'QSO']
     # run BGS
     #version = 'abacus-2ndgen-dr2-altmtl'
@@ -200,16 +203,20 @@ if __name__ == '__main__':
     #stats = ['particle2_correlation', 'particle3_correlation', 'close_pair_correction'][:2]
     #stats = ['particle2_correlation', 'close_pair_correction']
     #stats = ['particle2_correlation']
-    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:0]
-    #stats = ['mesh3_spectrum', 'close_pair_correction']
-    #postprocess = ['combine_regions']
-    postprocess = ['systematic_templates']
+    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum']
+    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][2:]
+    #stats = ['window_mesh3_spectrum']
+    #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:2]
+    stats = ['mesh2_spectrum', 'close_pair_correction'][:0]
+    postprocess = ['combine_regions']
+    #postprocess = ['systematic_templates']
     weight = 'default-FKP'
     #weight = 'default-FKP-bitwise-iip'
-    #weight = 'default-FKP'
+    #weight = 'default-nn-FKP'
     #weight = 'default-FKP-noimsys'
     #weight = 'default'
-    regions = ['NGC', 'SGC'][:1]
+    #regions = ['NGC', 'SGC']
+    regions = ['NGC', 'SGC']
     #regions = ['SGCnoDES', 'DES']
     max_mocks_per_batch = 5
 
@@ -231,6 +238,7 @@ if __name__ == '__main__':
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+        #zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][3:]
 
         def get_run_stats():
             if mode == 'interactive':
@@ -249,18 +257,8 @@ if __name__ == '__main__':
                                                                                            region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
             imocks = exists[1]['imock']
         if True:
-            if any('window' in stat for stat in stats):
-                _imocks = imocks[:1]
-                nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
-                if nbatches >= 1:
-                    # Add dependence on other tasks
-                    get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
-            elif any('covariance' in stat for stat in stats):
-                get_run_stats()(imocks=[0], stats=stats, **run_stats_kws)
+            if any('covariance' in stat for stat in stats):
+                get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
             elif stats:
                 batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
                 for _imocks in batch_imocks:

@@ -19,28 +19,31 @@ THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors', 'comet']
 COSMO_MODELS = ['base', 'base_ns-fixed', 'fixed']
 PRIOR_BASES = ['physical', 'physical_aap', 'tcm_chudaykin_aap', 'standard']
 SAMPLERS = ['emcee', 'zeus', 'mhmcmc', 'nuts', 'pocomc', 'nautilus', 'numpyro_nuts', 'numpyro_barker']
-DEFAULT_BOX_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics/box')
-DEFAULT_EZMOCK_STATS_DIR = Path('/dvs_ro/cfs/cdirs/desi/science/cai/desi-clustering/dr2/summary_statistics/mock_challenge/ezmock')
-DEFAULT_FITS_DIR = Path(os.getenv('SCRATCH', '.')) / 'fits_box_mocks'
-DEFAULT_CACHE_DIR = Path(os.getenv('SCRATCH', '.')) / 'desi-clustering/full_shape/job_scripts/_cache'
-DEFAULT_TRACER = 'QSO_lorentzian'
-DEFAULT_VERSION = 'abacus-hf-v2'
-DEFAULT_ZSNAP = 1.475
-DEFAULT_STATS = ('mesh2_spectrum', 'mesh3_spectrum')
+FOLPSD_DAMPINGS = ['exp', 'lor', 'vdg']
+FOLPSD_DAMPING_METHODS = [
+    'none', 'loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn', 'all',
+]
+BOX_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics/box')
+EZMOCK_STATS_DIR = Path('/dvs_ro/cfs/cdirs/desi/science/cai/desi-clustering/dr2/summary_statistics/mock_challenge/ezmock')
+FITS_DIR = Path(os.getenv('SCRATCH', '.')) / 'fits_box_mocks'
+CACHE_DIR = Path(os.getenv('SCRATCH', '.')) / 'desi-clustering/full_shape/job_scripts/_cache'
+TRACER = 'QSO_lorentzian'
+VERSION = 'abacus-hf-v2'
+ZSNAP = 1.475
+STATS = ('mesh2_spectrum', 'mesh3_spectrum')
+FOLPSD_DAMPING = 'vdg'
+FOLPSD_DAMPING_METHOD = 'tree+loop'
+GELMAN_RUBIN = 1.03
+ESS = 700
 KRANGES = {
     'mesh2_spectrum': [
-        {'ells': 0, 'k': [0.02, 0.20, 0.01]},
-        {'ells': 2, 'k': [0.02, 0.20, 0.01]},
+        {'ells': 0, 'k': [0.02, 0.30, 0.01]},
+        {'ells': 2, 'k': [0.02, 0.30, 0.01]},
     ],
     'mesh3_spectrum': [
-        {'ells': (0, 0, 0), 'k': [0.02, 0.20, 0.01]},
-        {'ells': (2, 0, 2), 'k': [0.02, 0.03, 0.01]},
+        {'ells': (0, 0, 0), 'k': [0.02, 0.10, 0.01]},
+        # {'ells': (2, 0, 2), 'k': [0.02, 0.03, 0.01]},
     ],
-}
-LOCAL_SAFE_THREAD_ENV = {
-    'OMP_NUM_THREADS': '1',
-    'OPENBLAS_NUM_THREADS': '1',
-    'VECLIB_MAXIMUM_THREADS': '1',
 }
 
 
@@ -54,17 +57,6 @@ def _get_kranges():
     }
 
 
-def _apply_local_safe_threads(environ=None):
-    environ = os.environ if environ is None else environ
-    for name, value in LOCAL_SAFE_THREAD_ENV.items():
-        environ.setdefault(name, value)
-    return environ
-
-
-def _normalize_stats(stats):
-    return (stats,) if isinstance(stats, str) else tuple(stats)
-
-
 def _parse_imocks(value):
     if value in [None, 'all', '*']:
         return '*'
@@ -73,22 +65,19 @@ def _parse_imocks(value):
     return int(value) if isinstance(value, str) else value
 
 
-def _validate_theory_model(stats, theory_model):
-    if theory_model == 'reptvelocileptors' and 'mesh3_spectrum' in stats:
-        raise ValueError('theory model reptvelocileptors is only supported with mesh2_spectrum')
-
-
-def _build_likelihood_options(stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, version=DEFAULT_VERSION, zsnap=DEFAULT_ZSNAP,
+def _build_likelihood_options(stats=STATS, tracer=TRACER, version=VERSION, zsnap=ZSNAP,
                               imocks='all', los=None, hod=None, cosmo=None,
-                              stats_dir=DEFAULT_BOX_STATS_DIR, covariance_stats_dir=DEFAULT_EZMOCK_STATS_DIR,
-                              theory_model='folpsD', prior_basis='physical_aap', emulator=None):
+                              stats_dir=BOX_STATS_DIR, covariance_stats_dir=EZMOCK_STATS_DIR,
+                              theory_model='folpsD', prior_basis='physical_aap', emulator=None,
+                              folpsd_damping=FOLPSD_DAMPING,
+                              folpsd_damping_method=FOLPSD_DAMPING_METHOD):
     from clustering_statistics import box_tools as clustering_box_tools
     from full_shape.box_tools import (generate_box_likelihood_options_helper,
                                       get_default_box_mesh3_basis,
                                       get_lsstypes_covariance_defaults)
 
-    stats = _normalize_stats(stats)
-    _validate_theory_model(stats, theory_model)
+    stats = (stats,) if isinstance(stats, str) else tuple(stats)
+    folpsd_damping_method = None if folpsd_damping_method == 'none' else folpsd_damping_method
     emulator = theory_model != 'comet' if emulator is None else emulator
     catalog_defaults = clustering_box_tools.propose_box_fiducial('catalog', tracer=tracer, version=version)
     los = catalog_defaults['los'] if los is None else los
@@ -124,14 +113,21 @@ def _build_likelihood_options(stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, versio
         observable_options.setdefault('theory', {})
         observable_options['theory']['model'] = theory_model
         observable_options['theory']['prior_basis'] = prior_basis
+        if theory_model == 'folpsD':
+            observable_options['theory']['damping'] = folpsd_damping
+            if 'mesh2_spectrum' in observable_options['stat']['kind']:
+                observable_options['theory']['damping_method'] = folpsd_damping_method
     return likelihood_options
 
 
-def _build_run_options(stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, version=DEFAULT_VERSION, zsnap=DEFAULT_ZSNAP,
+def _build_run_options(stats=STATS, tracer=TRACER, version=VERSION, zsnap=ZSNAP,
                        imocks='all', los=None, hod=None, cosmo=None,
-                       stats_dir=DEFAULT_BOX_STATS_DIR, covariance_stats_dir=DEFAULT_EZMOCK_STATS_DIR,
+                       stats_dir=BOX_STATS_DIR, covariance_stats_dir=EZMOCK_STATS_DIR,
                        theory_model='folpsD', prior_basis='physical_aap', cosmo_model='base',
-                       template='direct', sampler='emcee', nchains=1, resume=False, emulator=None):
+                       template='direct', sampler='emcee', nchains=1, resume=False, emulator=None,
+                       gelman_rubin=GELMAN_RUBIN, ess=ESS,
+                       folpsd_damping=FOLPSD_DAMPING,
+                       folpsd_damping_method=FOLPSD_DAMPING_METHOD):
     from full_shape import tools
 
     likelihood_options = _build_likelihood_options(
@@ -139,6 +135,7 @@ def _build_run_options(stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, version=DEFAU
         imocks=imocks, los=los, hod=hod, cosmo=cosmo,
         stats_dir=stats_dir, covariance_stats_dir=covariance_stats_dir,
         theory_model=theory_model, prior_basis=prior_basis, emulator=emulator,
+        folpsd_damping=folpsd_damping, folpsd_damping_method=folpsd_damping_method,
     )
     options = {
         'likelihoods': [likelihood_options],
@@ -154,6 +151,10 @@ def _build_run_options(stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, version=DEFAU
         },
     }
     options = tools.fill_fiducial_options(options)
+    if gelman_rubin is not None and 'gelman_rubin' in options['sampler']['run']:
+        options['sampler']['run']['gelman_rubin'] = gelman_rubin
+    if ess is not None and 'ess' in options['sampler']['run']:
+        options['sampler']['run']['ess'] = ess
     for section in ['init', 'run']:
         if 'nparallel' in options['sampler'][section]:
             options['sampler'][section]['nparallel'] = nchains
@@ -184,16 +185,16 @@ def _plot_profile_best_fit(options, get_stats_fn, get_fits_fn, cache_dir, mpicom
 
 def _get_parser():
     parser = argparse.ArgumentParser(description='Run full-shape fits with cubic box mocks.')
-    parser.add_argument('--tracer', default=DEFAULT_TRACER)
-    parser.add_argument('--version', default=DEFAULT_VERSION)
-    parser.add_argument('--zsnap', type=float, default=DEFAULT_ZSNAP)
+    parser.add_argument('--tracer', default=TRACER)
+    parser.add_argument('--version', default=VERSION)
+    parser.add_argument('--zsnap', type=float, default=ZSNAP)
     parser.add_argument('--todo', type=str, nargs='*', default=['profile'],
                         choices=['build', 'profile', 'sample'],
                         help='Run build, profile, and / or sample. Defaults to profile.')
     parser.add_argument('--actions', dest='todo', type=str, nargs='*',
                         choices=['build', 'profile', 'sample'],
                         default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    parser.add_argument('--stats', type=str, nargs='*', default=list(DEFAULT_STATS),
+    parser.add_argument('--stats', type=str, nargs='*', default=list(STATS),
                         choices=['mesh2_spectrum', 'mesh3_spectrum'],
                         help='Statistics to fit. Defaults to mesh2_spectrum mesh3_spectrum.')
     parser.add_argument('--theory_model', type=str, default='folpsD',
@@ -202,6 +203,12 @@ def _get_parser():
     parser.add_argument('--prior_basis', type=str, default='physical_aap',
                         choices=PRIOR_BASES,
                         help='Nuisance-parameter prior basis. Defaults to physical_aap.')
+    parser.add_argument('--folpsd_damping', type=str, default=FOLPSD_DAMPING,
+                        choices=FOLPSD_DAMPINGS,
+                        help=f'FoG damping kernel for folpsD fits. Defaults to {FOLPSD_DAMPING}.')
+    parser.add_argument('--folpsd_damping_method', type=str, default=FOLPSD_DAMPING_METHOD,
+                        choices=FOLPSD_DAMPING_METHODS,
+                        help=f"FoG damping method for folpsD mesh2 fits. Use 'none' for desilike's None mode. Defaults to {FOLPSD_DAMPING_METHOD}.")
     parser.add_argument('--cosmo_params', type=str, default='base',
                         choices=COSMO_MODELS,
                         help='Cosmology parameter setup to fit. Defaults to base.')
@@ -212,41 +219,41 @@ def _get_parser():
     parser.add_argument('--los', default=None)
     parser.add_argument('--hod', default=None)
     parser.add_argument('--cosmo', default=None)
-    parser.add_argument('--stats_dir', type=Path, default=DEFAULT_BOX_STATS_DIR,
-                        help=f'Base directory for box clustering statistics. Defaults to {DEFAULT_BOX_STATS_DIR}.')
+    parser.add_argument('--stats_dir', type=Path, default=BOX_STATS_DIR,
+                        help=f'Base directory for box clustering statistics. Defaults to {BOX_STATS_DIR}.')
     parser.add_argument('--box-stats-dir', dest='stats_dir', type=Path,
                         default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    parser.add_argument('--covariance_stats_dir', type=Path, default=DEFAULT_EZMOCK_STATS_DIR,
-                        help=f'Base directory for lsstypes EZmock covariance statistics. Defaults to {DEFAULT_EZMOCK_STATS_DIR}.')
+    parser.add_argument('--covariance_stats_dir', type=Path, default=EZMOCK_STATS_DIR,
+                        help=f'Base directory for lsstypes EZmock covariance statistics. Defaults to {EZMOCK_STATS_DIR}.')
     parser.add_argument('--covariance-stats-dir', dest='covariance_stats_dir', type=Path,
                         default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    parser.add_argument('--fits_dir', type=Path, default=DEFAULT_FITS_DIR,
-                        help=f'Base directory for fits. Defaults to {DEFAULT_FITS_DIR}.')
+    parser.add_argument('--fits_dir', type=Path, default=FITS_DIR,
+                        help=f'Base directory for fits. Defaults to {FITS_DIR}.')
     parser.add_argument('--fits-dir', dest='fits_dir', type=Path,
                         default=argparse.SUPPRESS, help=argparse.SUPPRESS)
-    parser.add_argument('--cache_dir', type=Path, default=DEFAULT_CACHE_DIR,
-                        help=f'Base directory for cached prepared stats and emulators. Defaults to {DEFAULT_CACHE_DIR}.')
+    parser.add_argument('--cache_dir', type=Path, default=CACHE_DIR,
+                        help=f'Base directory for cached prepared stats and emulators. Defaults to {CACHE_DIR}.')
     parser.add_argument('--template', default='direct')
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
+    parser.add_argument('--gelman_rubin', type=float, default=GELMAN_RUBIN,
+                        help=f'Gelman-Rubin convergence threshold for MCMC samplers. Defaults to {GELMAN_RUBIN}.')
+    parser.add_argument('--ess', type=float, default=ESS,
+                        help=f'Effective sample size convergence threshold for MCMC samplers. Defaults to {ESS}.')
     parser.add_argument('--resume', action='store_true',
                         help='Resume sampling from existing chain files in the derived fits directory.')
-    parser.add_argument('--no_emulator', action='store_true',
-                        help='Disable Taylor emulators and evaluate the theory directly.')
-    parser.add_argument('--local_safe_threads', action='store_true',
-                        help='Limit OpenMP/BLAS thread counts for local runs.')
-    parser.add_argument('--local-safe-threads', dest='local_safe_threads', action='store_true',
-                        default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     return parser
 
 
-def run_fit(actions=('profile',), template='direct', fits_dir=DEFAULT_FITS_DIR,
-            stats=DEFAULT_STATS, tracer=DEFAULT_TRACER, version=DEFAULT_VERSION, zsnap=DEFAULT_ZSNAP,
+def run_fit(actions=('profile',), template='direct', fits_dir=FITS_DIR,
+            stats=STATS, tracer=TRACER, version=VERSION, zsnap=ZSNAP,
             imocks='all', los=None, hod=None, cosmo=None,
-            stats_dir=DEFAULT_BOX_STATS_DIR, covariance_stats_dir=DEFAULT_EZMOCK_STATS_DIR,
-            cache_dir=DEFAULT_CACHE_DIR, theory_model='folpsD', prior_basis='physical_aap',
+            stats_dir=BOX_STATS_DIR, covariance_stats_dir=EZMOCK_STATS_DIR,
+            cache_dir=CACHE_DIR, theory_model='folpsD', prior_basis='physical_aap',
             cosmo_model='base', sampler='emcee', nchains=1, resume=False,
-            emulator=None, local_safe_threads=False):
+            emulator=None, local_safe_threads=False, gelman_rubin=GELMAN_RUBIN, ess=ESS,
+            folpsd_damping=FOLPSD_DAMPING,
+            folpsd_damping_method=FOLPSD_DAMPING_METHOD):
     # Everything inside this function will be executed on the compute nodes;
     # this function must be self-contained and cannot rely on imports from the outer scope.
     import os
@@ -276,7 +283,8 @@ def run_fit(actions=('profile',), template='direct', fits_dir=DEFAULT_FITS_DIR,
         stats_dir=stats_dir, covariance_stats_dir=covariance_stats_dir,
         theory_model=theory_model, prior_basis=prior_basis, cosmo_model=cosmo_model,
         template=template, sampler=sampler, nchains=nchains, resume=resume,
-        emulator=emulator,
+        emulator=emulator, gelman_rubin=gelman_rubin, ess=ess,
+        folpsd_damping=folpsd_damping, folpsd_damping_method=folpsd_damping_method,
     )
     get_fits_fn = functools.partial(get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -306,5 +314,7 @@ if __name__ == '__main__':
         cache_dir=args.cache_dir, theory_model=args.theory_model, prior_basis=args.prior_basis,
         cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
         resume=args.resume, emulator=False if args.no_emulator else None,
-        local_safe_threads=args.local_safe_threads,
+        local_safe_threads=args.local_safe_threads, gelman_rubin=args.gelman_rubin, ess=args.ess,
+        folpsd_damping=args.folpsd_damping,
+        folpsd_damping_method=args.folpsd_damping_method,
     )

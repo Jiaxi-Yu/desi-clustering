@@ -47,8 +47,8 @@ def run_fit(actions=('profile',), tracer='LRG1', data='data-dr2-v1.1', project='
         for observable_options in likelihood_options['observables']:
             observable_options['stat']['jackknife'] = {'nsplits': 60}
         cov_stats_dir = tools.base_stats_dir
-        likelihood_options['covariance'] = {'source': 'rascalc', 'version': 'data-dr2-v1.1', 'project': 'bao/rascalc', 'stats_dir': cov_stats_dir}
-        #likelihood_options['covariance'] = {'source': 'jaxpower', 'version': 'data-dr2-v1.1', 'stats_dir': stats_dir}
+        likelihood_options['covariance'] = {'source': 'rascalc', 'version': data, 'project': 'bao/rascalc', 'stats_dir': cov_stats_dir}
+        #likelihood_options['covariance'] = {'source': 'jaxpower', 'version': data, 'stats_dir': stats_dir}
     options['cosmology'] = {'template': template, 'apmode': 'qisoqap'}
     options = fill_fiducial_options(options)
 
@@ -86,6 +86,7 @@ if __name__ == '__main__':
 
     stats_dir = tools.base_stats_dir
     fits_dir = tools.base_fits_dir
+    data = 'data-dr2-v1.1'
 
     for tracer in ['BGS1', 'LRG1', 'LRG2', 'LRG3', 'ELG2', 'QSO1']:
-        run_fit(actions=['profile', 'sample'], data='data-dr2-v1.1', project='bao/with_desi-clustering', tracer=tracer, stats_dir=stats_dir, fits_dir=fits_dir)
+        run_fit(actions=['profile', 'sample'], data=data, project=f'bao/with_desi-clustering/{data}', tracer=tracer, stats_dir=stats_dir, fits_dir=fits_dir)

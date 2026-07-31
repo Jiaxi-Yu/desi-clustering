@@ -10,7 +10,7 @@ import argparse
 import json
 from pathlib import Path
 
-from . import bao, rsd
+from . import bao, fnl, rsd
 from .diagnostics import write_diagnostic_plots
 from .lss_catalogs import (
     DEFAULT_REDSHIFT_COLUMNS,
@@ -25,8 +25,8 @@ from .lss_catalogs import (
     write_fits_catalog,
 )
 
-SUPPORTED_MODES = ('bao', 'rsd')
-FUTURE_MODES = ('fnl',)
+SUPPORTED_MODES = ('bao', 'rsd', 'fnl')
+FUTURE_MODES = ()
 
 
 def normalize_modes(modes):
@@ -37,11 +37,6 @@ def normalize_modes(modes):
     normalized = []
     for mode in modes:
         value = aliases.get(str(mode).lower(), str(mode).lower())
-        if value in FUTURE_MODES:
-            raise NotImplementedError(
-                'Catalog-level fNL blinding is not implemented yet. Add the desiblind fNL blinder first, '
-                'then wire it through clustering_statistics.catalog_blinding.fnl and this saved-catalog driver.'
-            )
         if value not in SUPPORTED_MODES:
             raise ValueError(f'Unsupported catalog blinding mode {mode!r}; supported modes are {SUPPORTED_MODES}')
         if value not in normalized:
@@ -79,7 +74,7 @@ def parse_args(args=None):
                         help='Optional FITS output for the computed reconstructed-realspace catalog.')
     parser.add_argument('--fits-ext', default='LSS')
     parser.add_argument('--modes', nargs='+', default=['bao'],
-                        help='Catalog-level blinding modes. Supported modes are bao/ap and rsd. If both are supplied, BAO/AP is applied before RSD.')
+                        help='Catalog-level blinding modes. Supported modes are bao/ap, rsd, and fnl. Modes are applied in LSS order: BAO/AP, RSD, then fNL.')
     parser.add_argument('--tracer-name', default='LRG3', help='Canonical desiblind tracer/bin name.')
     parser.add_argument('--region', default=None,
                         help='Sky region for LSS-like random resampling. Use NGC to apply the LSS DEC=32.375 split.')
@@ -90,6 +85,8 @@ def parse_args(args=None):
     parser.add_argument('--wa', type=float, default=None)
     parser.add_argument('--zeff', type=float, default=None)
     parser.add_argument('--bias', type=float, default=None)
+    parser.add_argument('--fnl', type=float, default=None,
+                        help='Local PNG fNL value for catalog-level fNL blinding.')
     parser.add_argument('--fiducial-f', type=float, default=0.8)
     parser.add_argument('--random-seed', type=int, default=0,
                         help='Seed used for LSS-like random redshift-column resampling.')
@@ -132,6 +129,12 @@ def parse_args(args=None):
     parser.add_argument('--fgrowth-blind', type=float, default=None,
                         help='Optional externally prepared RSD fgrowth_blind override.')
     parser.add_argument('--max-df-fraction', type=float, default=0.1)
+    parser.add_argument('--fnl-smoothing-radius', type=float, default=30.,
+                        help='Smoothing radius passed to mockfactory CutskyCatalogBlinding.png for fNL.')
+    parser.add_argument('--fnl-recon', default='IterativeFFTReconstruction',
+                        help='pyrecon reconstruction class name passed to mockfactory for fNL.')
+    parser.add_argument('--fnl-cellsize', type=float, default=None,
+                        help='Optional fNL reconstruction cellsize. mockfactory defaults to 15 when omitted.')
     parser.add_argument('--diagnostic-plot-dir', default=None,
                         help='Optional directory for real-run diagnostic plots comparing data/random redshift and weight distributions at each blinding step.')
     parser.add_argument('--diagnostic-plot-prefix', default='catalog_blinding',
@@ -252,6 +255,7 @@ def run_from_args(args):
     jax_boxcenter = None
     bao_nz_reweight = None
     post_bao_data = None
+    fnl_weight_factor = None
     nbar_zmin, nbar_zmax = _resolved_nbar_zrange(args)
     p0 = _resolved_p0(args)
     random_split_columns = _resolved_random_split_columns(args)
@@ -381,8 +385,28 @@ def run_from_args(args):
         )
         applied.append({'mode': 'rsd', 'parameters': normalized_rsd})
 
+    if 'fnl' in modes:
+        if random is None:
+            raise ValueError('--random-catalog or --random-catalog-template is required when --modes includes fnl')
+        fnl_random = reconstruction_random if reconstruction_random is not None else random
+        fnl_parameters = {'fnl': args.fnl, 'zeff': args.zeff, 'bias': args.bias}
+        fnl_kwargs = {}
+        for cli_name, kw_name in [
+            ('fnl_cellsize', 'cellsize'),
+        ]:
+            value = getattr(args, cli_name, None)
+            if value is not None:
+                fnl_kwargs[kw_name] = value
+        data, normalized_fnl, fnl_weight_factor = fnl.apply_blinding(
+            args.tracer_name, data, fnl_random, parameters=fnl_parameters,
+            weight_col='WEIGHT', random_weight_col='WEIGHT',
+            zcol=args.output_zcol, smoothing_radius=args.fnl_smoothing_radius,
+            recon=args.fnl_recon, copy=False, **fnl_kwargs,
+        )
+        applied.append({'mode': 'fnl', 'parameters': normalized_fnl})
+
     if random is not None:
-        if 'rsd' in modes and not args.skip_final_random_resample:
+        if (('rsd' in modes or 'fnl' in modes) and not args.skip_final_random_resample):
             final_random = resample_randoms_from_data(
                 random, data, columns=args.random_resample_columns,
                 split_columns=random_split_columns, seed=args.random_seed,
@@ -421,6 +445,7 @@ def run_from_args(args):
             dz=args.nz_dz,
             prefix=getattr(args, 'diagnostic_plot_prefix', 'catalog_blinding'),
             bao_nz_reweight=bao_nz_reweight,
+            fnl_weight_factor=fnl_weight_factor,
         )
 
     output = write_fits_catalog(data, args.output_catalog, ext=args.fits_ext, clobber=args.clobber)
@@ -465,7 +490,7 @@ def run_from_args(args):
         'lss_like_catalogs': {
             'bao_nz_reweight': bool(bao_nz_reweight is not None),
             'reconstruction_random_resampled': bool(random is not None and ('bao' in modes or 'rsd' in modes)),
-            'final_random_resampled': bool(random is not None and 'rsd' in modes and not args.skip_final_random_resample),
+            'final_random_resampled': bool(random is not None and ('rsd' in modes or 'fnl' in modes) and not args.skip_final_random_resample),
             'final_nbar_fkp': bool(final_nbar is not None),
             'random_resample_columns': list(args.random_resample_columns),
             'random_split_columns': list(random_split_columns),

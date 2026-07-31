@@ -190,6 +190,10 @@ def fill_box_fiducial_options(kwargs):
             spectrum_options = options[stat.replace('covariance_', '')]
             spectrum_options = {key: value for key, value in spectrum_options.items() if key in ['mattrs']}
             options[stat] = spectrum_options | options.get(stat, {})
+        for stat in ['covariance_mesh3_spectrum']:
+            spectrum_options = options[stat.replace('covariance_', '')]
+            spectrum_options = {key: value for key, value in spectrum_options.items() if key in ['mattrs']}
+            options[stat] = spectrum_options | options.get(stat, {})
     return options
 
 

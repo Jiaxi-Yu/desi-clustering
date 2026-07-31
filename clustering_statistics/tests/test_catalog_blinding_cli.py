@@ -5,19 +5,21 @@ import numpy as np
 import pytest
 from mockfactory import Catalog
 
-from clustering_statistics.catalog_blinding import bao, cli as driver, rsd
+from clustering_statistics.catalog_blinding import bao, cli as driver, fnl, rsd
 
 try:
     from desiblind.catalog_bao import CatalogBAOBlinder
     from desiblind.catalog_rsd import CatalogRSDBlinder
+    from desiblind.catalog_fnl import CatalogFNLBlinder
 except ImportError:  # pragma: no cover - depends on optional checkout
     CatalogBAOBlinder = None
     CatalogRSDBlinder = None
+    CatalogFNLBlinder = None
 
 
 pytestmark = pytest.mark.skipif(
-    CatalogBAOBlinder is None or CatalogRSDBlinder is None,
-    reason='desiblind catalog_bao/catalog_rsd modules are not importable',
+    CatalogBAOBlinder is None or CatalogRSDBlinder is None or CatalogFNLBlinder is None,
+    reason='desiblind catalog_bao/catalog_rsd/catalog_fnl modules are not importable',
 )
 
 
@@ -43,7 +45,7 @@ def base_args(input_fn, output_fn, **overrides):
         random_catalog=None, save_reconstruction_random_catalog=None,
         realspace_catalog=None, run_pyrecon=False, run_jaxrecon=False, save_realspace_catalog=None,
         fits_ext='LSS', modes=['rsd'], tracer_name='LRG3', input_zcol='Z', output_zcol='Z',
-        realspace_zcol='Z', w0=None, wa=None, zeff=None, bias=None, fiducial_f=0.8,
+        realspace_zcol='Z', w0=None, wa=None, zeff=None, bias=None, fnl=None, fiducial_f=0.8,
         random_seed=0, random_resample_columns=['Z', 'WEIGHT', 'WEIGHT_SYS', 'WEIGHT_COMP', 'WEIGHT_ZFAIL', 'TARGETID_DATA'],
         random_split_columns=['PHOTSYS'], skip_bao_nz_reweight=True, skip_final_random_resample=False,
         skip_final_nbar=True, nz_zmin=None, nz_zmax=None, nz_dz=0.01, p0=10000., compmd='ran',
@@ -51,6 +53,7 @@ def base_args(input_fn, output_fn, **overrides):
         recon_threshold_randoms=0.01, recon_threshold_randoms_method='mean', recon_growth_rate=None,
         recon_cellsize=None, recon_meshsize=None, recon_boxsize=None, recon_boxcenter=None,
         recon_nthreads=64, recon_weight_col='WEIGHT', fgrowth_blind=0.88, max_df_fraction=0.1,
+        fnl_smoothing_radius=30., fnl_recon='IterativeFFTReconstruction', fnl_cellsize=None,
         summary_file=None, clobber=False,
     )
     args.update(overrides)
@@ -61,8 +64,8 @@ def test_normalize_modes_orders_bao_before_rsd():
     assert driver.normalize_modes(['rsd', 'bao']) == ('bao', 'rsd')
     assert driver.normalize_modes('bao,rsd') == ('bao', 'rsd')
     assert driver.normalize_modes(['ap']) == ('bao',)
-    with pytest.raises(NotImplementedError, match='fNL'):
-        driver.normalize_modes(['fnl'])
+    assert driver.normalize_modes(['fnl']) == ('fnl',)
+    assert driver.normalize_modes(['fnl', 'rsd', 'bao']) == ('bao', 'rsd', 'fnl')
 
 
 def test_bao_adapter_delegates_to_desiblind():
@@ -83,6 +86,32 @@ def test_rsd_adapter_delegates_to_desiblind():
     expected = CatalogRSDBlinder.apply_blinding('LRG3', catalog, realspace, parameters=normalized)
     np.testing.assert_allclose(blinded['Z'], expected['Z'], rtol=0, atol=1e-12)
     assert applied['fgrowth_blind'] == normalized['fgrowth_blind']
+
+
+def test_fnl_adapter_delegates_to_desiblind(monkeypatch):
+    catalog = make_catalog([0.5, 0.7, 0.9])
+    random = make_catalog([0.51, 0.71, 0.91, 1.0])
+    expected_factor = np.array([1.1, 0.9, 1.05])
+
+    def fake_apply_blinding(name, data, randoms, parameters=None, **kwargs):
+        assert name == 'LRG3'
+        assert parameters['fnl'] == 5.0
+        assert parameters['zeff'] == 0.8
+        assert parameters['bias'] == 2.0
+        assert kwargs['return_weight_factor'] is True
+        out = data.copy()
+        out['WEIGHT'] = np.asarray(out['WEIGHT']) * expected_factor
+        out['WEIGHT_COMP'] = np.asarray(out['WEIGHT_COMP']) * expected_factor
+        return out, expected_factor
+
+    monkeypatch.setattr(CatalogFNLBlinder, 'apply_blinding', fake_apply_blinding)
+    blinded, applied, factor = fnl.apply_blinding(
+        'LRG3', catalog, random, parameters={'fnl': 5.0, 'zeff': 0.8, 'bias': 2.0}
+    )
+    np.testing.assert_allclose(factor, expected_factor)
+    np.testing.assert_allclose(blinded['WEIGHT'], np.asarray(catalog['WEIGHT']) * expected_factor)
+    np.testing.assert_allclose(blinded['WEIGHT_COMP'], np.asarray(catalog['WEIGHT_COMP']) * expected_factor)
+    assert applied['fnl'] == 5.0
 
 
 def test_rsd_normalization_ignores_none_fgrowth_override():
@@ -344,3 +373,63 @@ def test_driver_uses_lss_like_random_templates_for_multiple_randoms(monkeypatch,
     for iran in range(2):
         assert (tmp_path / f'output_random_{iran}.fits').exists()
         assert (tmp_path / f'recon_random_{iran}.fits').exists()
+
+
+def test_driver_fnl_applies_before_final_random_resampling(monkeypatch, tmp_path):
+    input_fn = tmp_path / 'input.fits'
+    random_fn = tmp_path / 'random.fits'
+    output_fn = tmp_path / 'output.fits'
+    output_random_fn = tmp_path / 'output_random.fits'
+    summary_fn = tmp_path / 'summary.json'
+    data = np.array([(1, 10., 0., 0.7, 'N', 1.0, 1.0, 1.0, 1.0),
+                     (2, 20., 1., 0.9, 'N', 2.0, 1.0, 1.0, 1.0),
+                     (3, 30., 2., 1.0, 'N', 3.0, 1.0, 1.0, 1.0)],
+                    dtype=[('TARGETID', 'i8'), ('RA', 'f8'), ('DEC', 'f8'), ('Z', 'f8'), ('PHOTSYS', 'U1'),
+                           ('WEIGHT', 'f8'), ('WEIGHT_SYS', 'f8'), ('WEIGHT_COMP', 'f8'), ('WEIGHT_ZFAIL', 'f8')])
+    random = np.array([(11, 11., 0.1, 0.71, 'N', 1.0, 1.0, 1.0, 1.0),
+                       (12, 21., 1.1, 0.91, 'N', 1.0, 1.0, 1.0, 1.0),
+                       (13, 31., 2.1, 1.01, 'N', 1.0, 1.0, 1.0, 1.0)], dtype=data.dtype)
+    fitsio.write(input_fn, data, extname='LSS', clobber=True)
+    fitsio.write(random_fn, random, extname='LSS', clobber=True)
+
+    factor = np.array([1.2, 0.8, 1.1])
+    calls = []
+
+    def fake_fnl_apply(tracer_name, catalog, randoms, *, parameters, **kwargs):
+        calls.append({
+            'tracer_name': tracer_name,
+            'parameters': parameters,
+            'random_len': len(randoms),
+        })
+        out = catalog.copy()
+        out['WEIGHT'] = np.asarray(out['WEIGHT']) * factor
+        out['WEIGHT_COMP'] = np.asarray(out['WEIGHT_COMP']) * factor
+        return out, {'fnl': parameters['fnl'], 'zeff': parameters['zeff'], 'bias': parameters['bias']}, factor
+
+    monkeypatch.setattr(fnl, 'apply_blinding', fake_fnl_apply)
+    args = base_args(
+        input_fn, output_fn, random_catalog=str(random_fn), output_random_catalog=str(output_random_fn),
+        modes=['fnl'], fnl=5.0, zeff=0.8, bias=2.0, compmd='dat', summary_file=str(summary_fn),
+        random_seed=0, random_resample_columns=['Z', 'WEIGHT', 'WEIGHT_COMP'],
+    )
+    summary = driver.run_from_args(args)
+    out = fitsio.read(output_fn, ext='LSS')
+    outr = fitsio.read(output_random_fn, ext='LSS')
+
+    # The driver first resets post-addnbar WEIGHT to the LSS pre-addnbar
+    # component weight, so the fNL factor is applied to WEIGHT_COMP *
+    # WEIGHT_SYS * WEIGHT_ZFAIL rather than the input final WEIGHT column.
+    np.testing.assert_allclose(out['WEIGHT'], factor)
+    np.testing.assert_allclose(out['WEIGHT_COMP'], data['WEIGHT_COMP'] * factor)
+    assert not any('BLIND' in name.upper() for name in out.dtype.names)
+    assert set(outr['WEIGHT']).issubset(set(out['WEIGHT']))
+    assert set(outr['WEIGHT_COMP']).issubset(set(out['WEIGHT_COMP']))
+    assert calls == [{
+        'tracer_name': 'LRG3',
+        'parameters': {'fnl': 5.0, 'zeff': 0.8, 'bias': 2.0},
+        'random_len': len(random),
+    }]
+    assert summary['modes'] == ['fnl']
+    assert summary['applied'] == [{'mode': 'fnl', 'parameters': {'fnl': 5.0, 'zeff': 0.8, 'bias': 2.0}}]
+    assert summary['lss_like_catalogs']['final_random_resampled'] is True
+    assert summary_fn.exists()

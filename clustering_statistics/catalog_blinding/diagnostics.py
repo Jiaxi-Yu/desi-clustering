@@ -178,7 +178,7 @@ def write_diagnostic_plots(output_dir, *, input_data, final_data, input_random=N
                            bao_ap_blinded_data=None, reconstruction_random=None,
                            final_random=None, modes=None, zcol='Z', zmin=None,
                            zmax=None, dz=None, prefix='catalog_blinding',
-                           bao_nz_reweight=None):
+                           bao_nz_reweight=None, fnl_weight_factor=None):
     """Write diagnostic plots for one real catalog-blinding run.
 
     Parameters are actual catalog states from the current run.  The plots are
@@ -278,7 +278,12 @@ def write_diagnostic_plots(output_dir, *, input_data, final_data, input_random=N
     if bao_nz_reweight is not None and bao_nz_reweight.get('correction') is not None:
         bao_nz_correction = np.asarray(bao_nz_reweight['correction'], dtype='f8')
         bao_nz_correction = bao_nz_correction[np.isfinite(bao_nz_correction)]
-    n_weight_panels = len(weight_columns) + (1 if bao_nz_correction is not None and bao_nz_correction.size else 0)
+    fnl_weight_factor = None if fnl_weight_factor is None else np.asarray(fnl_weight_factor, dtype='f8')
+    if fnl_weight_factor is not None:
+        fnl_weight_factor = fnl_weight_factor[np.isfinite(fnl_weight_factor)]
+    n_weight_panels = (len(weight_columns)
+                       + (1 if bao_nz_correction is not None and bao_nz_correction.size else 0)
+                       + (1 if fnl_weight_factor is not None and fnl_weight_factor.size else 0))
     if n_weight_panels:
         ncols = min(2, n_weight_panels)
         nrows = int(np.ceil(n_weight_panels / ncols))
@@ -322,6 +327,16 @@ def write_diagnostic_plots(output_dir, *, input_data, final_data, input_random=N
             ax.set_ylabel('density')
             ax.legend(fontsize=7)
             next_panel += 1
+        if fnl_weight_factor is not None and fnl_weight_factor.size:
+            ax = axes.flat[next_panel]
+            bins = np.linspace(float(np.nanmin(fnl_weight_factor)), float(np.nanmax(fnl_weight_factor)), 61)
+            if bins[0] == bins[-1]:
+                bins = np.linspace(bins[0] - 0.5, bins[0] + 0.5, 61)
+            ax.hist(fnl_weight_factor, bins=bins, histtype='step', density=True, label='internal fNL weight factor')
+            ax.set_xlabel('internal fNL weight factor')
+            ax.set_ylabel('density')
+            ax.legend(fontsize=7)
+            next_panel += 1
         for ax in axes.flat[next_panel:]:
             ax.axis('off')
         path = output_dir / f'{prefix}_weight_diagnostics.png'
@@ -341,6 +356,7 @@ def write_diagnostic_plots(output_dir, *, input_data, final_data, input_random=N
             'final_random': bool(show_final_random),
             'weight_histograms_normalized': True,
             'bao_nz_factor_internal': bool(bao_nz_correction is not None and bao_nz_correction.size),
+            'fnl_weight_factor_internal': bool(fnl_weight_factor is not None and fnl_weight_factor.size),
         },
         'row_counts': {
             'input_data': int(len(input_data)) if input_data is not None else None,
@@ -363,6 +379,7 @@ def write_diagnostic_plots(output_dir, *, input_data, final_data, input_random=N
             'final_data': _summary_stats(final_data, weight_columns),
             'final_random': _summary_stats(final_random, weight_columns),
             'internal_bao_nz_factor': _summary_array(bao_nz_correction),
+            'internal_fnl_weight_factor': _summary_array(fnl_weight_factor),
         },
     }
     summary_path = output_dir / f'{prefix}_diagnostics.json'

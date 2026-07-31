@@ -24,6 +24,15 @@ THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors', 'comet']
 COSMO_MODELS = ['base', 'base_ns-fixed', 'fixed']
 PRIOR_BASES = ['physical', 'physical_aap', 'tcm_chudaykin_aap', 'standard']
 SAMPLERS = ['emcee', 'zeus', 'mhmcmc', 'nuts', 'pocomc', 'nautilus', 'numpyro_nuts', 'numpyro_barker']
+FOLPSD_DAMPINGS = ['exp', 'lor', 'vdg']
+FOLPSD_DAMPING_METHODS = [
+    'none', 'loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn', 'all',
+]
+FOLPSD_DAMPING = 'vdg'
+FOLPSD_DAMPING_METHOD = 'tree+loop'
+GELMAN_RUBIN = 1.03
+ESS = 700
+PROFILE_ITERATIONS = 4
 DEFAULT_STATS_DIR = Path('/global/cfs/cdirs/desicollab/science/cai/desi-clustering/dr2/summary_statistics')
 DEFAULT_PROJECT = 'full_shape/base'
 #DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / '_cache'
@@ -46,48 +55,146 @@ KRANGES = {
 }
 
 
+def _get_kranges():
+    return {
+        stat: [
+            {'ells': item['ells'], 'k': list(item['k'])}
+            for item in selects
+        ]
+        for stat, selects in KRANGES.items()
+    }
+
+
+def _normalize_ells(value):
+    """Return an integer or tuple representation of a multipole selector."""
+    if isinstance(value, (tuple, list)):
+        values = tuple(int(item) for item in value)
+        return values[0] if len(values) == 1 else values
+    values = tuple(int(item.strip()) for item in str(value).split(',') if item.strip())
+    if not values:
+        raise ValueError('Multipole selector cannot be empty.')
+    return values[0] if len(values) == 1 else values
+
+
+def _parse_kmax_overrides(values):
+    """Parse repeatable ``STAT:ELLS=KMAX`` command-line overrides."""
+    overrides = []
+    for value in values or []:
+        try:
+            selector, kmax = value.rsplit('=', 1)
+            stat, ells = selector.split(':', 1)
+            overrides.append({'stat': stat, 'ells': _normalize_ells(ells), 'kmax': float(kmax)})
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid kmax override {value!r}; expected STAT:ELLS=KMAX, "
+                "for example mesh2_spectrum:0=0.15 or mesh3_spectrum:0,0,0=0.10."
+            ) from exc
+    return overrides
+
+
+def _apply_kmax_overrides(kranges, overrides):
+    """Apply validated overrides to a copied KRANGES mapping."""
+    for override in overrides or []:
+        stat, ells, kmax = override['stat'], _normalize_ells(override['ells']), float(override['kmax'])
+        if stat not in kranges:
+            raise ValueError(f"Unknown statistic {stat!r} in kmax override.")
+        matches = [item for item in kranges[stat] if _normalize_ells(item['ells']) == ells]
+        if not matches:
+            raise ValueError(f"No {stat!r} selection with ells={ells!r}.")
+        if len(matches) != 1:
+            raise ValueError(f"Ambiguous {stat!r} selection with ells={ells!r}.")
+        klim = matches[0]['k']
+        if kmax <= klim[0]:
+            raise ValueError(
+                f"kmax={kmax} must be greater than kmin={klim[0]} for {stat}:{ells}; "
+                "this cut would select no bins."
+            )
+        step = klim[2]
+        nstep = round((kmax - klim[0]) / step)
+        if not abs(klim[0] + nstep * step - kmax) < 1e-8:
+            raise ValueError(f"kmax={kmax} is not on the {stat}:{ells} grid with step {step}.")
+        klim[1] = kmax
+    return kranges
+
+
 def _validate_theory_model(stats, theory_model):
     if theory_model == 'reptvelocileptors' and 'mesh3_spectrum' in stats:
         raise ValueError('theory model reptvelocileptors is only supported with mesh2_spectrum')
 
 
-def _apply_kranges(observable_options):
+def _apply_kranges(observable_options, kranges=None):
     stat = observable_options['stat']['kind']
-    if stat not in KRANGES:
+    kranges = _get_kranges() if kranges is None else kranges
+    if stat not in kranges:
         return
     observable_options['stat']['select'] = [
         {'ells': item['ells'], 'k': list(item['k'])}
-        for item in KRANGES[stat]
+        for item in kranges[stat]
     ]
 
 
-def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
-                               prior_basis='physical_aap', emulator=True):
+def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir,
+                               project=DEFAULT_PROJECT, theory_model='folpsD',
+                               prior_basis='physical_aap', emulator=True,
+                               folpsd_damping=FOLPSD_DAMPING,
+                               folpsd_damping_method=FOLPSD_DAMPING_METHOD,
+                               kmax_overrides=None, mesh3_theory_dk=None):
     _validate_theory_model(stats, theory_model)
+    if mesh3_theory_dk is not None and mesh3_theory_dk <= 0.:
+        raise ValueError('mesh3_theory_dk must be positive.')
+    folpsd_damping_method = None if folpsd_damping_method == 'none' else folpsd_damping_method
+    kranges = _apply_kmax_overrides(_get_kranges(), kmax_overrides)
     likelihoods = []
     for tracer in tracers:
+        # The BGS alternate-MTL covariance products live in their own version;
+        # the other cut-sky tracers use the common holi-v3 products.
+        tracer_covariance = covariance
+        if 'BGS' in tracer and isinstance(covariance, str) and 'holi' in covariance:
+            tracer_covariance = 'holi-bgs-altmtl'
         likelihood_options = tools.generate_likelihood_options_helper(
             stats=stats,
             tracer=tracer,
             version=version,
-            covariance=covariance,
+            covariance=tracer_covariance,
             stats_dir=stats_dir,
             project=project,
-            emulator=emulator or theory_model != 'comet',
+            emulator=emulator and theory_model != 'comet',
         )
         for observable_options in likelihood_options['observables']:
-            _apply_kranges(observable_options)
+            _apply_kranges(observable_options, kranges=kranges)
+            if 'mesh3_spectrum' in observable_options['stat']['kind'] and mesh3_theory_dk is not None:
+                observable_options.setdefault('window', {})['theory_dk'] = float(mesh3_theory_dk)
             observable_options.setdefault('theory', {})
             observable_options['theory']['model'] = theory_model
             #observable_options['theory']['marg'] = False
             observable_options['theory']['prior_basis'] = prior_basis
+            if theory_model == 'folpsD':
+                observable_options['theory']['damping'] = folpsd_damping
+                if 'mesh2_spectrum' in observable_options['stat']['kind']:
+                    observable_options['theory']['damping_method'] = folpsd_damping_method
+            else:
+                observable_options['theory'].pop('damping', None)
+                observable_options['theory'].pop('damping_method', None)
+        # Covariance mocks are stored beneath full_shape/base independently
+        # of the project used for the fitted data vectors.
+        likelihood_options['covariance']['source'] = 'mock'
+        likelihood_options['covariance']['project'] = 'full_shape/base'
         likelihoods.append(likelihood_options)
     return likelihoods
 
 
-def _build_run_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
+def _build_run_options(stats, tracers, version, covariance, stats_dir,
+                       project=DEFAULT_PROJECT, theory_model='folpsD',
                        cosmo_model='base', template='direct', sampler='emcee', nchains=1,
-                       resume=False, prior_basis='physical_aap', emulator=True):
+                       resume=False, prior_basis='physical_aap', emulator=True,
+                       gelman_rubin=GELMAN_RUBIN, ess=ESS,
+                       profile_iterations=PROFILE_ITERATIONS,
+                       folpsd_damping=FOLPSD_DAMPING,
+                       folpsd_damping_method=FOLPSD_DAMPING_METHOD,
+                       kmax_overrides=None, mesh3_theory_dk=None):
+    profile_iterations = int(profile_iterations)
+    if profile_iterations <= 0:
+        raise ValueError('profile_iterations must be positive.')
     options = {}
     options['likelihoods'] = _build_likelihoods_options(
         stats=stats,
@@ -99,16 +206,30 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, project, 
         theory_model=theory_model,
         prior_basis=prior_basis,
         emulator=emulator,
+        folpsd_damping=folpsd_damping,
+        folpsd_damping_method=folpsd_damping_method,
+        kmax_overrides=kmax_overrides,
+        mesh3_theory_dk=mesh3_theory_dk,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
-    options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
-    sampler_kw = {'nparallel': nchains}
+    options['sampler'] = {
+        'sampler': sampler,
+        'nchains': nchains,
+        'resume': resume,
+    }
+    options = tools.fill_fiducial_options(options)
+    if theory_model != 'folpsD':
+        for likelihood_options in options['likelihoods']:
+            for observable_options in likelihood_options['observables']:
+                observable_options['theory'].pop('damping', None)
+                observable_options['theory'].pop('damping_method', None)
+    options['profiler']['maximize']['niterations'] = profile_iterations
+    sampler_kw = {'nparallel': nchains, 'gelman_rubin': gelman_rubin, 'ess': ess}
     for section in ['init', 'run']:
-        for name, value in options['sampler'][section].items():
+        for name in options['sampler'][section]:
             if name in sampler_kw:
                 options['sampler'][section][name] = sampler_kw[name]
-    options['sampler']['resume'] = resume
-    return tools.fill_fiducial_options(options)
+    return options
 
 
 def _apply_local_safe_threads(environ=None):
@@ -126,7 +247,12 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
             cache_dir=DEFAULT_CACHE_DIR,
             stats=['mesh2_spectrum'], tracers=None, theory_model='folpsD',
             cosmo_model='base', sampler='emcee', nchains=1, resume=False,
-            prior_basis='physical_aap', emulator=True, local_safe_threads=False):
+            prior_basis='physical_aap', emulator=True, local_safe_threads=False,
+            gelman_rubin=GELMAN_RUBIN, ess=ESS,
+            profile_iterations=PROFILE_ITERATIONS,
+            folpsd_damping=FOLPSD_DAMPING,
+            folpsd_damping_method=FOLPSD_DAMPING_METHOD,
+            kmax_overrides=None, mesh3_theory_dk=None):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -163,6 +289,13 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         resume=resume,
         prior_basis=prior_basis,
         emulator=emulator,
+        gelman_rubin=gelman_rubin,
+        ess=ess,
+        profile_iterations=profile_iterations,
+        folpsd_damping=folpsd_damping,
+        folpsd_damping_method=folpsd_damping_method,
+        kmax_overrides=kmax_overrides,
+        mesh3_theory_dk=mesh3_theory_dk,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -200,6 +333,14 @@ def _get_parser():
     parser.add_argument('--prior_basis', type=str, default='physical_aap',
                         choices=PRIOR_BASES,
                         help='Nuisance-parameter prior basis. Defaults to physical_aap.')
+    parser.add_argument('--folpsd_damping', type=str, default=FOLPSD_DAMPING,
+                        choices=FOLPSD_DAMPINGS,
+                        help=f'FoG damping kernel for folpsD fits. Defaults to {FOLPSD_DAMPING}.')
+    parser.add_argument('--folpsd_damping_method', type=str, default=FOLPSD_DAMPING_METHOD,
+                        choices=FOLPSD_DAMPING_METHODS,
+                        help=(f'FoG damping method for folpsD mesh2 fits. none is an alias for '
+                              f'tree+loop+ctr; all is an alias for tree+loop+ctr+sn. '
+                              f'Defaults to {FOLPSD_DAMPING_METHOD}.'))
     parser.add_argument('--cosmo_params', type=str, default='base',
                         choices=COSMO_MODELS,
                         help='Cosmology parameter setup to fit. base varies h, omega_cdm, omega_b, logA, n_s; '
@@ -218,8 +359,24 @@ def _get_parser():
                         help=f'Base directory for clustering statistics. Defaults to {DEFAULT_PROJECT}.')
     parser.add_argument('--cache_dir', type=str, default=DEFAULT_CACHE_DIR,
                         help=f'Base directory for cached prepared stats and emulators. Defaults to {DEFAULT_CACHE_DIR}.')
+    parser.add_argument(
+        '--kmax', action='append', default=[], metavar='STAT:ELLS=KMAX',
+        help=('Override one selection kmax; repeat as needed. Examples: '
+              'mesh2_spectrum:0=0.15, mesh3_spectrum:0,0,0=0.10.'),
+    )
+    parser.add_argument(
+        '--mesh3-theory-dk', type=float, default=0.005, metavar='DK',
+        help=('Fix the first-stage mesh3 window-theory spacing independently of the observable '
+              'binning. Omit to retain the current dynamic behavior.'),
+    )
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
+    parser.add_argument('--gelman_rubin', type=float, default=GELMAN_RUBIN,
+                        help=f'Gelman-Rubin convergence threshold for MCMC samplers. Defaults to {GELMAN_RUBIN}.')
+    parser.add_argument('--ess', type=float, default=ESS,
+                        help=f'Effective sample size convergence threshold for MCMC samplers. Defaults to {ESS}.')
+    parser.add_argument('--profile-iterations', type=int, default=PROFILE_ITERATIONS,
+                        help=f'Independent profiling starts. Defaults to {PROFILE_ITERATIONS}.')
     parser.add_argument('--resume', action='store_true',
                         help='Resume sampling from existing chain files in the derived fits directory.')
     parser.add_argument('--no_emulator', action='store_true',
@@ -243,9 +400,16 @@ if __name__ == '__main__':
     cache_dir = Path(args.cache_dir)
     stats = args.stats
     tracers = args.tracers or ['LRG1']
+    kmax_overrides = _parse_kmax_overrides(args.kmax)
     _validate_theory_model(stats, args.theory_model)
     run_fit(actions=args.todo, version=version, covariance=covariance, stats_dir=stats_dir, project=args.project,
             fits_dir=fits_dir, cache_dir=cache_dir, stats=stats, tracers=tracers, theory_model=args.theory_model,
             cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
             resume=args.resume, prior_basis=args.prior_basis,
-            local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator)
+            gelman_rubin=args.gelman_rubin, ess=args.ess,
+            profile_iterations=args.profile_iterations,
+            folpsd_damping=args.folpsd_damping,
+            folpsd_damping_method=args.folpsd_damping_method,
+            local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator,
+            kmax_overrides=kmax_overrides,
+            mesh3_theory_dk=args.mesh3_theory_dk)

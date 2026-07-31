@@ -330,14 +330,12 @@ def set_lss_pre_addnbar_weight(catalog, *, extra_weight=None, copy=True):
     values divided by per-NTILE completeness.  For a faithful on-the-fly BAO
     workflow we need the intermediate LSS state used by ``mkclusran`` before
     ``addnbar``: ``WEIGHT_COMP * WEIGHT_SYS * WEIGHT_ZFAIL`` times
-    any explicit internal blinding weight factors and optional ``WEIGHT_BLIND``,
-    with no per-NTILE division.  Randoms sample this temporary
+    any explicit internal blinding weight factors, with no per-NTILE division.
+    Randoms sample this temporary
     value, and ``add_nbar_fkp`` applies the final ntile division exactly once.
     """
     out = copy_catalog(catalog) if copy else catalog
     wt = _component_weight(out, extra_weight=extra_weight)
-    if has_column(out, 'WEIGHT_BLIND'):
-        wt = wt * np.asarray(out['WEIGHT_BLIND'], dtype='f8')
     out['WEIGHT'] = wt
     return out
 
@@ -446,8 +444,6 @@ def add_nbar_fkp(data, randoms=None, *, zcol='Z', zmin=None, zmax=None, dz=0.01,
         cat['NZ'] = nz
         cat['NX'] = nz * comp_ntile[idx]
         wt = _component_weight(cat, extra_weight=data_extra_weight)
-        if has_column(cat, 'WEIGHT_BLIND'):
-            wt = wt * np.asarray(cat['WEIGHT_BLIND'], dtype='f8')
         cat['WEIGHT'] = wt / weight_ntile[idx]
         cat['WEIGHT_FKP'] = 1. / (1. + np.asarray(cat['NX'], dtype='f8') * float(p0))
         return cat
@@ -462,8 +458,6 @@ def add_nbar_fkp(data, randoms=None, *, zcol='Z', zmin=None, zmax=None, dz=0.01,
         wt = _component_weight(cat)
         if compmd == 'ran' and has_column(cat, 'FRAC_TLOBS_TILES'):
             wt = wt * np.asarray(cat['FRAC_TLOBS_TILES'], dtype='f8')
-        if has_column(cat, 'WEIGHT_BLIND'):
-            wt = wt * np.asarray(cat['WEIGHT_BLIND'], dtype='f8')
         wtfac = np.ones(_length(cat), dtype='f8')
         sel = wt > 0
         wtfac[sel] = old_weight[sel] / wt[sel]

@@ -52,7 +52,7 @@ def run_stats(version='data-dr1-v1.5', tracer='LRG', weight='default-FKP', zrang
         # Fill in missing options with default/fiducial values from tools
         options = fill_fiducial_options(options)
         # Compute all requested statistics
-        compute_stats_from_options(stats, get_stats_fn=get_stats_fn, cache=cache, **options)
+        compute_stats_from_options(stats, get_stats_fn=get_stats_fn, cache=cache, prepare_catalog=prepare_catalog **options)
 
 
 def postprocess_stats(version='data-dr2-v1.1', tracer='LRG', weight='default-FKP', stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', postprocess=['combine_regions'], **kwargs):

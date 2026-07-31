@@ -92,8 +92,18 @@ def compute_particle3_angular_upweights(*get_data_randoms):
             all_particles_fibered.append({'data': particles['fibered_data'], 'randoms': particles['fibered_randoms']})
             all_particles_parent.append({'data': particles['parent_data'], 'randoms': particles['parent_randoms']})
 
-        theta = 10**np.arange(-4, np.log10(180.), 0.2)
-        #theta = 10**np.arange(-4, np.log10(180.), 0.4)
+        # 0.5-dex bins everywhere (the upweights are flat below 0.003 deg and vary on
+        # >~ 1-dex scales beyond 0.1 deg), refined to 0.1 dex across the collision kernel
+        # (0.003 - 0.1 deg, steep + double-close transition at ~0.05 deg; exact counting
+        # there, so fine bins are cheap). Wide bins at wide angles let
+        # compute_particle3_resol digitize coarsely while keeping the healpix pixel
+        # below ~1/4 of the bin width.
+        theta = np.concatenate([
+            10**np.arange(-4., -2.5, 0.5),
+            10**np.arange(-2.5, -1., 0.1),
+            10**np.arange(-1., np.log10(180.), 0.5),
+            [180.],
+        ])
         battrs = BinAttrs(theta=theta)
 
         counts_fibered = _compute_particle3_correlation_close_pair_correction(all_particles_fibered, [battrs] * 3, auw=None, cut=None, veto23=None, normalize_randoms=False)
@@ -354,9 +364,26 @@ def _compute_particle3_correlation_close_pair_correction(all_particles, battrs, 
             limits = [lim for lim in limits if lim < sepmax] + [sepmax]
             resols = [None, 50., 100., 500.]
         else:  # theta
-            limits = [0., 0.3, 1., 5., 180.]
+            import healpy as hp
+            # Digitization snaps the digitized particle to healpix pixel centers, which perturbs
+            # theta by up to ~1 pixel: start each resolution shell at the first bin edge whose bin
+            # is >= 4 pixels wide, so the perturbation stays below ~1/4 bin width and shell seams
+            # sit on bin edges (a seam cutting through a bin mixes two pixelizations in one bin).
+            edges = np.unique(battrs_resol.edges(resol_coord))
+            widths = np.diff(edges)
+            # nside candidates spaced by x8: each shell is a separate count3close launch
+            # with sizable fixed cost, so few coarse steps beat many fine ones.
+            limits, resols = [0.], [None]
+            for nside in [512, 64, 16]:
+                pixsize = np.degrees(hp.nside2resol(nside))
+                wide_enough = np.flatnonzero(widths >= 4. * pixsize)
+                if not wide_enough.size:
+                    break
+                lim = edges[wide_enough[0]]
+                if lim > limits[-1]:
+                    limits.append(lim)
+                    resols.append(nside)
             limits = [lim for lim in limits if lim < sepmax] + [sepmax]
-            resols = [None, 512, 128, 32]
 
         with_veto = True
         if len(close_pairs) == 1:

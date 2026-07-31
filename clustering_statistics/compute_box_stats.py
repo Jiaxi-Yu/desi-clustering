@@ -28,7 +28,7 @@ from .box_tools import fill_box_fiducial_options, _merge_options, Catalog, setup
 from .correlation2_tools import compute_box_particle2_correlation
 from .correlation3_tools import compute_box_particle3_correlation
 from .spectrum2_tools import compute_box_mesh2_spectrum, compute_window_box_mesh2_spectrum, compute_covariance_box_mesh2_spectrum, run_preliminary_fit_mesh2_spectrum
-from .spectrum3_tools import compute_box_mesh3_spectrum
+from .spectrum3_tools import compute_box_mesh3_spectrum, compute_covariance_box_mesh3_spectrum, run_preliminary_fit_mesh3_spectrum
 from .recon_tools import compute_box_reconstruction
 
 
@@ -204,6 +204,57 @@ def compute_box_stats_from_options(stats, cache=None,
             covariance = func(theory=theory, **covariance_options)
             fn = get_box_stats_fn(kind=stat, catalog=fn_catalog_options, **covariance_options)
             box_tools.write_stats(fn, covariance)
+
+    # Joint 2-point + 3-point covariance for a periodic box. Unlike covariance_mesh2_spectrum,
+    # this only supports a single tracer: compute_covariance_box_mesh3_spectrum does not
+    # implement multi-tracer cross-covariance (it always labels both P and B with the same field).
+    stat = 'covariance_mesh3_spectrum'
+    if stat in stats:
+        assert len(tracers) == 1, f'{stat} only supports a single tracer, got {tracers}'
+        tracer = tracers[0]
+        simple_tracer = box_tools.get_simple_tracer(tracer)
+        covariance_options = dict(options[stat])
+        covariance_options['mattrs'] = cmattrs | covariance_options.get('mattrs', {})
+        # theory is a python callable (P/B/T kernels at best-fit bias), not an lsstypes object:
+        # unlike covariance_mesh2_spectrum's theory, it is not written to disk.
+        theory = covariance_options.pop('theory', None)
+        shotnoise = covariance_options.pop('shotnoise', None)
+
+        # Auto-detect the measured P(k), B(k1, k2): they set the covariance binning and, if
+        # theory is not provided, are fit to get the bias parameters.
+        spectrum2_fn = covariance_options.pop('spectrum2', None)
+        if spectrum2_fn is None:
+            spectrum2_fn = get_box_stats_fn(kind='mesh2_spectrum', catalog=fn_catalog_options[tracer], **options['mesh2_spectrum'])
+        spectrum3_fn = covariance_options.pop('spectrum3', None)
+        if spectrum3_fn is None:
+            spectrum3_fn = get_box_stats_fn(kind='mesh3_spectrum', catalog=fn_catalog_options[tracer], **options['mesh3_spectrum'])
+        spectrum2, spectrum3 = types.read(spectrum2_fn), types.read(spectrum3_fn)
+
+        if shotnoise is None:
+            # (1 + alpha) / nbar, read off the FKP monopole shot noise level
+            shotnoise = float(np.mean(spectrum2.get(spectrum2.ells[0]).values('shotnoise')))
+
+        if theory is None:
+            from jaxpower import MeshAttrs
+            # Fit bias parameters on the joint (P, B) data vector, using the box volume for the
+            # mesh attrs. No window2 is available for a periodic box, so
+            # run_preliminary_fit_mesh3_spectrum falls back to reading z from spectrum2.attrs
+            # ['zeff'] -- attach the snapshot redshift there under that name for this call only.
+            spectrum2_z = spectrum2.clone(attrs=dict(spectrum2.attrs) | dict(zeff=zsnap))
+            theory = run_preliminary_fit_mesh3_spectrum(spectrum2_z, spectrum3, mattrs=MeshAttrs(**covariance_options['mattrs']))
+
+        covariance = compute_covariance_box_mesh3_spectrum(spectrum2, spectrum3, theory, shotnoise=shotnoise, **covariance_options)
+
+        def add_label(covariance):
+            # Label the two stacked (P, B) blocks with their observable kind and tracer(s)
+            from .tools import get_simple_stats
+            observable = types.ObservableTree(list(covariance.observable),
+                                              observables=[get_simple_stats(name) for name in ['mesh2_spectrum', 'mesh3_spectrum']],
+                                              tracers=[(simple_tracer,) * 2, (simple_tracer,) * 3])
+            return covariance.clone(observable=observable)
+
+        fn = get_box_stats_fn(kind=stat, catalog=fn_catalog_options, **covariance_options)
+        box_tools.write_stats(fn, add_label(covariance))
 
 
 def list_stats(stats, get_box_stats_fn=box_tools.get_box_stats_fn, **kwargs):
