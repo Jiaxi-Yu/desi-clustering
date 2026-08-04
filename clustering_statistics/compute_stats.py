@@ -614,30 +614,30 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                                 spectrum[key].attrs.update(stat_recon_attrs)
                             write_stats(fn, spectrum[key])
 
-            # Angular statistics. Kept apart from the mesh spectra: desiblind provides no angular blinder.
-            funcs = {'angular2_spectrum': compute_angular2_spectrum, 'angular3_spectrum': compute_angular3_spectrum}
+        # Angular statistics. Outside the `recon` loop and desiblind provides no angular blinder.
+        funcs = {'angular2_spectrum': compute_angular2_spectrum, 'angular3_spectrum': compute_angular3_spectrum}
 
-            for stat, func in funcs.items():
-                if stat in stats:
-                    spectrum_options = dict(options[stat])
-                    # Extract selection weights if provided (e.g., NX**(-1. / 3.) weighting)
-                    selection_weights = spectrum_options.pop('selection_weights', None)
+        for stat, func in funcs.items():
+            if stat in stats:
+                spectrum_options = dict(options[stat])
+                # Extract selection weights if provided (e.g., NX**(-1. / 3.) weighting)
+                selection_weights = spectrum_options.pop('selection_weights', None)
 
-                    def get_data(tracer):
-                        # Concatenate all random catalogs into single object
-                        czrandoms = Catalog.concatenate(zrandoms[tracer])
-                        toret = {'data': zdata[tracer], 'randoms': czrandoms}
-                        # Apply selection weights if provided
-                        if selection_weights:
-                            toret = {name: selection_weights[tracer](catalog) for name, catalog in toret.items()}
-                        return toret
+                def get_data(tracer):
+                    # Concatenate all random catalogs into single object
+                    czrandoms = Catalog.concatenate(zrandoms[tracer])
+                    toret = {'data': zdata[tracer], 'randoms': czrandoms}
+                    # Apply selection weights if provided
+                    if selection_weights:
+                        toret = {name: selection_weights[tracer](catalog) for name, catalog in toret.items()}
+                    return toret
 
-                    spectrum = func(*[functools.partial(get_data, tracer) for tracer in tracers], cache=cache, **spectrum_options)
+                spectrum = func(*[functools.partial(get_data, tracer) for tracer in tracers], cache=cache, **spectrum_options)
 
-                    # Write to disk
-                    for key, kw in _expand_cut_auw_options(stat, spectrum_options).items():
-                        fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
-                        write_stats(fn, spectrum[key])
+                # Write to disk
+                for key, kw in _expand_cut_auw_options(stat, spectrum_options).items():
+                    fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
+                    write_stats(fn, spectrum[key])
 
         # Synchronize across all processes before proceeding to windows
         jax.experimental.multihost_utils.sync_global_devices('spectrum')  # wait for the writer
