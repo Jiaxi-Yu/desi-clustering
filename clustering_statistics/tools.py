@@ -548,7 +548,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum'] = dict(propose_fiducial['covariance_mesh2_spectrum'])
     _mattrs = propose_fiducial['covariance_mesh2_spectrum']['mattrs']
     propose_fiducial['covariance_mesh3_spectrum']['mattrs'] = {'meshsize': _mattrs['meshsize'] // 2, 'cellsize': 2. * _mattrs['cellsize']}
-    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PB' 
+    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PB'
     for name in ['covariance_mesh2_spectrum', 'covariance_particle2_correlation']:
         propose_fiducial[name.replace('covariance_', 'covariance_recon_')] = propose_fiducial[name]
 
@@ -565,7 +565,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['combine_window_mesh2_spectrum'] = {'effect': 'RIC+AMR', 'method': 'spline'}
 
     if "window_mesh2_spectrum_fm" in kind:
-        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
+        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LGExELG": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
 
         if simple_tracers[0] not in ["BGS", "LRG", "LGE", "ELG", "QSO"]:
             warnings.warn(f"tracer {tracer} is not supported for window_mesh2_spectrum_fm, skipping")
@@ -645,6 +645,15 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
                 amr_regions_zranges=list(itertools.product(propose_photoregions[simple_tracers[0]], propose_regression_zranges[simple_tracers[0]])),
             )
 
+    if "shotnoise_mesh2_spectrum_fm" in kind:
+        from copy import deepcopy
+
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"] = deepcopy(propose_fiducial["window_mesh2_spectrum_fm"])
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["batch_size"]
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["unitary_amplitude"]
+
+        propose_sigma = dict.fromkeys(["BGS", "LRG", "LGE", "ELG", "QSO"], 10.0) | dict.fromkeys(["LRGxLGE", "LRGxELG", "LRGxQSO", "ELGxQSO"], (10.0, 10.0))
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"].update(sigma=propose_sigma[simple_tracer])
     return propose_fiducial[kind]
 
 def _combine_tracer_catalogs(catalogs, nz_files, biases, P0, zmin, zmax, dz=0.01, kind='data', combine=None):
@@ -1127,7 +1136,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
 
-        elif version == 'holi-v4-altmtl-maskedfraczpNN':
+        elif version in ['holi-v4-altmtl-NN', 'holi-v4-altmtl-maskedfraczpNN']:
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_v4/altmtl'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
             ext = 'h5'
@@ -1135,7 +1144,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             if 'full' in kind:
                 cat_dir = cat_dir.parent
-        
+
         elif version == 'holi-bgs-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_bgs'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
@@ -1165,13 +1174,13 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             if 'full' in kind:
                 cat_dir = cat_dir.parent
-        
+
         elif version == 'glam-uchuu-v2-complete':
             # TODO: Decide where to save complete version of the clustering catalogs.
             base_dir = base_stats_dir / 'auxiliary_data' / version
             cat_dir = base_dir / f'complete{imock:d}/loa-v1/mock{imock:d}/LSScats'
             ext = 'h5'
-            
+
         elif version == 'glam-uchuu-bgs-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/glam_bgs/'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
@@ -1245,7 +1254,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             ext = 'h5'
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
-        
+
         elif version == 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/AbacusHF_DR2v2'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
@@ -1254,7 +1263,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             if 'full' in kind:
                 cat_dir = cat_dir.parent
-        
+
         elif 'abacus-hf-lc-dr2' in version:
             assert 'QSO' in tracer
             version = version.split('-')[-1]
@@ -1828,7 +1837,7 @@ def read_catalog(kind=None, concatenate=True, get_catalog_fn=get_catalog_fn,
         raise IOError(f'Catalogs {[fn for fn, ex in exists.items() if not ex]} do not exist!')
 
     kwargs.pop('combine', None)
-    
+
     complete_data = None
 
     if isinstance(complete, dict):
@@ -2895,7 +2904,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
     P0 = {'BGS': 7e3, 'LRG': 1e4, 'LGE': 1e4, 'ELG': 4e3, 'QSO': 6e3}[tracer]
     if 'R_MAG_ABS' in full_data.columns():
         logger.info('Using R_MAG_ABS in Full data')
-        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN', 'R_MAG_ABS']] 
+        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN', 'R_MAG_ABS']]
         forfa_data = forfa_data[['TARGETID', 'RSDZ']]
     elif 'TRACER_TYPE' in forfa_data.columns():
         logger.info('Using TRACER_TYPE in forFA data')
@@ -2905,7 +2914,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
         full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN']]
         forfa_data = forfa_data[['TARGETID', 'RSDZ']]
     forfa_data['Z'] = forfa_data.pop('RSDZ')
-    
+
     # 'FRACZ_TILELOCID', 'FRAC_TLOBS_TILES'
     _, full_index, forfa_index = np.intersect1d(full_data['TARGETID'], forfa_data['TARGETID'], return_indices=True)
     data = full_data[full_index]
@@ -2977,7 +2986,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
                 # logger.info(f"{(data['TRACER_TYPE'] == _tracer.encode()).sum()}")
                 downsample_mag = data['TRACER_TYPE'] == _tracer.encode() # TODO: figure out where the values of 'TRACER_TYPE' got converted to byte strings)
                 data = data[downsample_mag]
-                
+
             # if True: #'ANY' in tracer:
             #     fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
             #     fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
@@ -3084,7 +3093,7 @@ def altmtl_from_full_data(forfa_data, full_data, nz, tracer, seed=42, remove_con
         zfrac = 0.966
         zrange = (0.4, 1.1)
 
-    if tracer.startswith('BGS'):        
+    if tracer.startswith('BGS'):
         if True: #'ANY' in tracer:
             fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
             fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
