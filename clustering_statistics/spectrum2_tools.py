@@ -2708,7 +2708,8 @@ def compute_angular2_spectrum(*get_data_randoms, mattrs=None, edges=None,
         if cache is None: cache = {}
         if norm is None: norm = {}
         kw_norm = dict(norm)
-        attrs.update(nside=aattrs.nside, ellmax=aattrs.ellmax)
+        # Skip None (nside is None for the pixel-free direct summation), which h5py cannot type
+        attrs.update({name: value for name, value in dict(aattrs).items() if value is not None})
 
         # ell-binning, cached across calls
         key = f'bin_angular2_spectrum_{aattrs.ellmax}_{aattrs.nside}'
