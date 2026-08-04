@@ -134,7 +134,7 @@ def add_cont_columns(catalog, wsys_map):
     return catalog
 
 
-def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS', contweight='CONT',
+def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'), imweight='WEIGHT_SYS', contweight='CONT',
               region='NGC', imocks=(0,), tracer='ELG_LOPnotqso', zranges=((1.1, 1.6),), analysis='full_shape',
               complete=None, gaussian=False):
     """
@@ -188,6 +188,11 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS',
         options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region,
                                     weight=f'default-FKP-wsys-{contweight}', imock=imock),
                        mesh2_spectrum={'auw': False, 'cut': False}, mesh3_spectrum={'auw': False},
+                       # Angular statistics: imaging systematics are an angular contamination, so
+                       # these probe it directly. 'mattrs' is the angular geometry, ellmax = 180 ~ 1 deg;
+                       # nside = None on the power spectrum selects the pixel-free direct summation.
+                       angular2_spectrum={'mattrs': {'nside': None, 'ellmax': 180}, 'edges': {'min': 1, 'step': 10}},
+                       angular3_spectrum={'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': [1, 4, 10, 20, 44, 79, 124, 178]},
                        window_mesh2_spectrum={'cut': False}, window_mesh3_spectrum={})
         options = fill_fiducial_options(options, analysis=analysis)
         for itracer in options['catalog']:
@@ -222,5 +227,5 @@ if __name__ == '__main__':
     for imweight in imweights:
         for contweight in contweights:
             for region in ['NGC', 'SGC'][:1]:
-                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum'], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
+                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
                 #run_stats(stats=['window_mesh2_spectrum', 'window_mesh3_spectrum'], imweight=imweight, contweight=contweight, region=region, imocks=[0], complete=complete, gaussian=gaussian)
