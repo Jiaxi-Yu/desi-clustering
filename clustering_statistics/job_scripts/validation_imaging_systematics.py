@@ -78,6 +78,14 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             mesh3_spectrum = {'auw': auw}
             mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
             window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
+            # Angular statistics, up to ellmax = 180 ~ 1 deg (ell = 180 deg / theta).
+            # nside = 256 keeps ellmax well below 2 * nside, which matters most for the bispectrum:
+            # it integrates a product of three band-filtered maps, so its accuracy is set by the
+            # healpix quadrature (the error falls as 1 / nside^2).
+            angular2_spectrum = {'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': {'min': 1, 'step': 10}}
+            # Bands roughly equally spaced in sqrt(ell) (~2.2 apart above ell = 20), with extra
+            # bands at low ell. 7 bands -> 51 valid band triplets.
+            angular3_spectrum = {'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': [1, 4, 10, 20, 44, 79, 124, 178]}
             mode = 'smu'
             if mode == 'smu':
                 particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 40., 41), mu=(np.linspace(-1., 1., 201), 'midpoint'))}
@@ -91,6 +99,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock),
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
+                           angular2_spectrum=angular2_spectrum, angular3_spectrum=angular3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
             options = fill_fiducial_options(options, analysis=analysis)
@@ -194,7 +203,7 @@ if __name__ == '__main__':
     #tracers = ['BGS_BRIGHT-02']
     #tracers = ['BGS_ANY-02']
 
-    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][1:2]
+    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][2:4]
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
     #weight = 'default-FKP'

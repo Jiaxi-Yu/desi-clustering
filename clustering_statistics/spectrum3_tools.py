@@ -1563,3 +1563,98 @@ def compute_covariance_box_mesh3_spectrum(spectrum2: types.Mesh2SpectrumPoles, s
         covariance = compute_spectrum3_covariance(mattrs, mattrs, observable, theory=_restrict_theory(theory, terms=terms),
                                                   shotnoise=shotnoise, cache={})
     return covariance
+
+def compute_angular3_spectrum(*get_data_randoms, mattrs=None, edges=None,
+                              method=None, norm: dict=None, cache=None):
+    r"""
+    Compute the angular bispectrum :math:`b_{\ell_1 \ell_2 \ell_3}`, binned in :math:`\ell`-bands,
+    from FKP fields with :mod:`jaxpower`.
+
+    Catalog positions are interpreted as directions on the sphere (they are normalized internally),
+    so the radial information is discarded and this measures the projected 3-point clustering.
+    The estimator integrates the product of band-filtered maps, normalized by the number of
+    triangles, see :class:`jaxpower.BinAngular3Spectrum`.
+
+    Parameters
+    ----------
+    get_data_randoms : callables
+        Functions that return dict of 'data', 'randoms' (optionally 'shifted') catalogs.
+        See :func:`prepare_jaxpower_particles` for details.
+    mattrs : dict, optional
+        Angular attributes, 'ellmax' (maximum multipole) and 'nside' (healpix resolution of the
+        band-filtered maps). Default is ``{'nside': 256, 'ellmax': 180}`` (:math:`\ell = 180` deg /
+        :math:`\theta`, so ``ellmax = 180`` is the degree scale). Take ``nside`` comfortably above
+        ``ellmax``: the estimator integrates a product of three maps, and its accuracy is set by the
+        healpix quadrature, which improves as :math:`1 / n_\mathrm{side}^2`. Unlike the power spectrum,
+        ``nside`` is required.
+        The estimator is not mesh-based, so no 3D mesh needs to be specified: the particles are laid
+        out (and sharded) on a coarse mesh of no consequence.
+    edges : array-like or dict, optional
+        :math:`\ell`-band edges, with keys 'min', 'max', 'step'. If ``None``, unit bands, which is
+        rarely what you want here: the number of band triplets grows as the cube of the number of bands.
+        See :class:`jaxpower.BinAngular3Spectrum` for details.
+    method : str, optional
+        'healpix' (default when ``nside`` is set) or 'direct', see :func:`compute_angular2_spectrum`.
+    norm : dict, optional
+        Optional arguments for :func:`jaxpower.compute_fkp_angular3_normalization`.
+    cache : dict, optional
+        Cache to store the binning class (reusable if ``ellmax`` and ``nside`` are the same).
+
+    Returns
+    -------
+    results : dict
+        Dictionary with key 'raw': the computed angular bispectrum (:class:`Angular3Spectrum`),
+        normalized and shot-noise subtracted.
+    """
+    from jaxpower import (create_sharding_mesh, FKPField, AngularAttrs, BinAngular3Spectrum,
+                          compute_angular3_spectrum, compute_fkp_angular3_normalization, compute_fkp_angular3_shotnoise)
+
+    aattrs = AngularAttrs(**(dict(nside=256, ellmax=180) | dict(mattrs or {})))
+    # Set up distributed computation across JAX devices
+    with create_sharding_mesh():
+        # IDS give a process-invariant random split for the normalization. The mesh only lays the
+        # particles out (and shards them) and is of no consequence here, so keep it coarse
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.), add_randoms=['IDS'])
+        # Attributes about the estimation (total weights, mesh geometry)
+        attrs = _get_jaxpower_attrs(*all_particles)
+
+        if cache is None: cache = {}
+        if norm is None: norm = {}
+        kw_norm = dict(norm)
+        attrs.update(nside=aattrs.nside, ellmax=aattrs.ellmax)
+
+        # ell-band triplets, cached across calls
+        key = f'bin_angular3_spectrum_{aattrs.ellmax}_{aattrs.nside}'
+        bin = cache.get(key, None)
+        if bin is None:
+            bin = BinAngular3Spectrum(aattrs, edges=edges)
+        cache.setdefault(key, bin)
+
+        # Normalization: integral of nbar^3 / (4 pi). Split the randoms in 3 disjoint samples
+        # (by IDS, so the split does not depend on the number of processes) to drop the self-terms
+        all_fkp = [FKPField(particles['data'], particles['randoms']) for particles in all_particles]
+        norm = compute_fkp_angular3_normalization(*all_fkp, bin=bin,
+                                                  split=[(42, fkp.randoms.extra['IDS']) for fkp in all_fkp], **kw_norm)
+
+        # Shot noise from the shifted catalogs (reconstruction) when available
+        all_fkp = [FKPField(particles['data'], particles['shifted'] if particles.get('shifted', None) is not None else particles['randoms']) for particles in all_particles]
+        del all_particles
+        # Self-contained: the C_ell-like term is measured from the catalogs, not modelled
+        num_shotnoise = compute_fkp_angular3_shotnoise(*all_fkp, bin=bin, method=method)
+
+        jax.block_until_ready((norm, num_shotnoise))
+        if jax.process_index() == 0:
+            logger.info('Normalization and shotnoise computation finished')
+
+        # a_lm of the FKP field (data - alpha randoms), then the band-filtered maps and their product
+        spectrum = compute_angular3_spectrum(*all_fkp, bin=bin, method=method)
+        del all_fkp
+        spectrum = spectrum.clone(norm=norm, num_shotnoise=num_shotnoise, attrs=attrs)
+
+        jax.block_until_ready(spectrum)
+        if jax.process_index() == 0:
+            logger.info('Angular computation finished')
+
+        results = {'raw': spectrum}
+
+    return results

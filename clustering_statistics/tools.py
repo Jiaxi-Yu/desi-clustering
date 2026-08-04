@@ -143,6 +143,10 @@ def get_simple_stats(stats):
         return 'spectrum2recon'
     elif stats == 'mesh3_spectrum':
         return 'spectrum3'
+    elif stats == 'angular2_spectrum':
+        return 'angular2'
+    elif stats == 'angular3_spectrum':
+        return 'angular3'
     elif stats == 'particle2_correlation':
         return 'correlation2'
     elif stats == 'recon_particle2_correlation':
@@ -455,7 +459,8 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     params : dict
         Dictionary of proposed fiducial parameters for the specified statistic kind and tracer.
     """
-    base = {"catalog": {}, "particle2_correlation": {},  "particle3_correlation": {}, "mesh2_spectrum": {}, "mesh3_spectrum": {}, "window_mesh2_spectrum_fm": {}}
+    base = {"catalog": {}, "particle2_correlation": {},  "particle3_correlation": {}, "mesh2_spectrum": {}, "mesh3_spectrum": {},
+            "angular2_spectrum": {}, "angular3_spectrum": {}, "window_mesh2_spectrum_fm": {}}
     propose_fiducial = {
         'BGS': {'nran': 3, 'recon': {'mode': 'recsym', 'bias': 1.5, 'smoothing_radius': 15., 'zrange': (0.1, 0.4)}},
         'LRG+LGE': {'nran': 10, 'recon': {'mode': 'recsym', 'bias': 1.9, 'smoothing_radius': 15.}, 'zrange': (0.4, 1.1),
@@ -508,6 +513,16 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
         propose_fiducial['mesh3_spectrum'].update(norm={'cellsize': 10.}, ells=[(0, 0, 0), (2, 0, 2)], basis='sugiyama-diagonal', selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
         propose_fiducial['particle2_correlation'].update(battrs={'s': np.linspace(0., 180., 181), 'mu': (np.linspace(-1., 1., 201), 'midpoint')})
         propose_fiducial['particle3_correlation'].update(battrs={'s': np.linspace(0., 160., 21), 'pole': (list(range(6)), 'firstpoint')}, selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
+
+    # Angular statistics: 'mattrs' is the angular geometry ('ellmax', 'nside'), not a 3D mesh -- the
+    # radial information is projected out and the routines lay the particles out on a coarse mesh of
+    # their own. ellmax = 180 is the degree scale (ell = 180 deg / theta). nside = None on the power
+    # spectrum selects the pixel-free direct summation; the bispectrum needs a grid, and wants nside
+    # well above ellmax since it integrates a product of three band-filtered maps. Its bands are
+    # roughly equally spaced in sqrt(ell), the number of band triplets growing as the cube of the
+    # number of bands.
+    propose_fiducial['angular2_spectrum'].update(mattrs={'nside': None, 'ellmax': 180}, edges={'min': 1, 'step': 10})
+    propose_fiducial['angular3_spectrum'].update(mattrs={'nside': 256, 'ellmax': 180}, edges=[1, 4, 10, 20, 44, 79, 124, 178])
 
     if 'protected' in analysis:
         propose_fiducial['mesh2_spectrum'].update(ells=(0,), edges={'min': 0.02, 'step': 0.001})
@@ -922,6 +937,10 @@ def fill_fiducial_options(kwargs, analysis='full_shape'):
                             if options[stat].get('optimal_weights', None) is not None:
                                 warnings.warn('Removing optimal_weights from mesh2_spectrum as OQE not in weights')
                             options[stat]['optimal_weights'] = None
+    # Angular statistics have no reconstructed variant, and take no 3D mesh
+    for stat in ['angular2_spectrum', 'angular3_spectrum']:
+        fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
+        options[stat] = fiducial_options | options.get(stat, {})
     for stat in ['window_mesh2_spectrum', 'window_mesh3_spectrum', 'window_mesh2_spectrum_fm']:
         spectrum_options = options[stat.replace('window_', '').replace('_fm', '')]
         spectrum_options = {key: value for key, value in spectrum_options.items() if key in ['selection_weights', 'optimal_weights', 'basis']}

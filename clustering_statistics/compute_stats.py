@@ -44,11 +44,12 @@ from .spectrum2_tools import (
     compute_rotation_mesh2_spectrum,
     compute_window_mesh2_spectrum_fm,
     compute_shotnoise_mesh2_spectrum_fm,
+    compute_angular2_spectrum,
 )
 
 from .correlation3_tools import compute_particle3_angular_upweights, compute_particle3_correlation, compute_particle3_correlation_close_pair_correction
 from .spectrum3_tools import (compute_mesh3_spectrum, compute_window_mesh3_spectrum, compute_mesh3_spectrum_close_pair_correction,
-                              compute_covariance_mesh3_spectrum, run_preliminary_fit_mesh3_spectrum)
+                              compute_covariance_mesh3_spectrum, run_preliminary_fit_mesh3_spectrum, compute_angular3_spectrum)
 
 from .recon_tools import compute_reconstruction
 from .systematic_templates import include_systematic_templates
@@ -163,7 +164,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
     ----------
     stats : str or list of str
         Summary statistics to compute.
-        Choices: ['mesh2_spectrum', 'mesh3_spectrum', 'particle2_correlation', 'recon_particle2_correlation', 'particle3_correlation', 'recon_particle3_correlation', 'close_pair_correction', 'window_mesh2_spectrum', 'window_mesh3_spectrum'].
+        Choices: ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum', 'particle2_correlation', 'recon_particle2_correlation', 'particle3_correlation', 'recon_particle3_correlation', 'close_pair_correction', 'window_mesh2_spectrum', 'window_mesh3_spectrum'].
         If 'close_pair_correction', add angular upweight or theta-cut correction to pre-computed standard 'mesh2_spectrum', 'mesh3_spectrum', 'particle2_correlation', 'particle3_correlation'.
     analysis : str, optional
         Type of analysis, 'full_shape' or 'png_local', to set fiducial options.
@@ -612,6 +613,31 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                             if recon:
                                 spectrum[key].attrs.update(stat_recon_attrs)
                             write_stats(fn, spectrum[key])
+
+            # Angular statistics. Kept apart from the mesh spectra: desiblind provides no angular blinder.
+            funcs = {'angular2_spectrum': compute_angular2_spectrum, 'angular3_spectrum': compute_angular3_spectrum}
+
+            for stat, func in funcs.items():
+                if stat in stats:
+                    spectrum_options = dict(options[stat])
+                    # Extract selection weights if provided (e.g., NX**(-1. / 3.) weighting)
+                    selection_weights = spectrum_options.pop('selection_weights', None)
+
+                    def get_data(tracer):
+                        # Concatenate all random catalogs into single object
+                        czrandoms = Catalog.concatenate(zrandoms[tracer])
+                        toret = {'data': zdata[tracer], 'randoms': czrandoms}
+                        # Apply selection weights if provided
+                        if selection_weights:
+                            toret = {name: selection_weights[tracer](catalog) for name, catalog in toret.items()}
+                        return toret
+
+                    spectrum = func(*[functools.partial(get_data, tracer) for tracer in tracers], cache=cache, **spectrum_options)
+
+                    # Write to disk
+                    for key, kw in _expand_cut_auw_options(stat, spectrum_options).items():
+                        fn = get_stats_fn(kind=stat, catalog=fn_catalog_options, **kw)
+                        write_stats(fn, spectrum[key])
 
         # Synchronize across all processes before proceeding to windows
         jax.experimental.multihost_utils.sync_global_devices('spectrum')  # wait for the writer

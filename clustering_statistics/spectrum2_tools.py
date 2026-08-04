@@ -2648,3 +2648,98 @@ def compute_covariance_box_mesh2_spectrum(theory: types.Mesh2SpectrumPoles=None,
         observable = types.ObservableTree(list(covariance.observable), observables=['spectrum2'] * len(fields), tracers=fields)
         covariance = covariance.clone(observable=observable)
     return covariance
+
+
+def compute_angular2_spectrum(*get_data_randoms, mattrs=None, edges=None,
+                              method=None, norm: dict=None, cache=None):
+    r"""
+    Compute the angular power spectrum :math:`C_\ell` from FKP fields with :mod:`jaxpower`.
+
+    Catalog positions are interpreted as directions on the sphere (they are normalized internally),
+    so the radial information is discarded and this measures the projected clustering of the sample.
+
+    Parameters
+    ----------
+    get_data_randoms : callables
+        Functions that return dict of 'data', 'randoms' (optionally 'shifted') catalogs.
+        See :func:`prepare_jaxpower_particles` for details.
+    mattrs : dict, optional
+        Angular attributes, 'ellmax' (maximum multipole) and 'nside' (healpix resolution used to
+        paint the field and the :math:`\bar{n}` estimate). Default is ``{'nside': None, 'ellmax': 180}``
+        (:math:`\ell = 180` deg / :math:`\theta`, so ``ellmax = 180`` is the degree scale); with
+        ``nside = None`` the pixel-free 'direct' summation is used.
+        The estimator is not mesh-based, so no 3D mesh needs to be specified: the particles are laid
+        out (and sharded) on a coarse mesh of no consequence.
+    edges : array-like or dict, optional
+        :math:`\ell`-band edges, with keys 'min', 'max', 'step'. If ``None``, unit bins.
+        See :class:`jaxpower.BinAngular2Spectrum` for details.
+    method : str, optional
+        'healpix' (paint, then transform) or 'direct' (pixel-free summation over particles,
+        https://arxiv.org/abs/2312.12285). If ``None``, 'healpix' is used, ``nside`` being set.
+
+        .. warning::
+
+            'direct' scans over the particle array, so prefer 'healpix' for distributed runs.
+
+    norm : dict, optional
+        Optional arguments for :func:`jaxpower.compute_fkp_angular2_normalization`, e.g. ``{'nside': 64}``
+        to estimate :math:`\bar{n}` at a coarser resolution. Defaults to the estimator's ``nside``.
+    cache : dict, optional
+        Cache to store the binning class (reusable if ``ellmax`` and ``nside`` are the same).
+
+    Returns
+    -------
+    results : dict
+        Dictionary with key 'raw': the computed angular power spectrum (:class:`Angular2Spectrum`),
+        normalized and shot-noise subtracted.
+    """
+    from jaxpower import (create_sharding_mesh, FKPField, AngularAttrs, BinAngular2Spectrum,
+                          compute_angular2_spectrum, compute_fkp_angular2_normalization, compute_fkp_angular2_shotnoise)
+
+    aattrs = AngularAttrs(**(dict(nside=None, ellmax=180) | dict(mattrs or {})))
+    # Set up distributed computation across JAX devices
+    with create_sharding_mesh():
+        # Load particles; positions are read as directions by the angular estimator. The mesh only
+        # lays them out (and shards them) and is of no consequence here, so keep it coarse
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.))
+        # Attributes about the estimation (total weights, mesh geometry)
+        attrs = _get_jaxpower_attrs(*all_particles)
+
+        if cache is None: cache = {}
+        if norm is None: norm = {}
+        kw_norm = dict(norm)
+        attrs.update(nside=aattrs.nside, ellmax=aattrs.ellmax)
+
+        # ell-binning, cached across calls
+        key = f'bin_angular2_spectrum_{aattrs.ellmax}_{aattrs.nside}'
+        bin = cache.get(key, None)
+        if bin is None:
+            bin = BinAngular2Spectrum(aattrs, edges=edges)
+        cache.setdefault(key, bin)
+
+        # Normalization: integral of nbar^2 / (4 pi), crossing data and randoms (uncorrelated,
+        # hence free of the Poisson self-pairs)
+        all_fkp = [FKPField(particles['data'], particles['randoms']) for particles in all_particles]
+        norm = compute_fkp_angular2_normalization(*all_fkp, bin=bin, **kw_norm)
+
+        # Shot noise from the shifted catalogs (reconstruction) when available
+        all_fkp = [FKPField(particles['data'], particles['shifted'] if particles.get('shifted', None) is not None else particles['randoms']) for particles in all_particles]
+        del all_particles
+        num_shotnoise = compute_fkp_angular2_shotnoise(*all_fkp, bin=bin)
+
+        jax.block_until_ready((norm, num_shotnoise))
+        if jax.process_index() == 0:
+            logger.info('Normalization and shotnoise computation finished')
+
+        # a_lm of the FKP field (data - alpha randoms), then C_ell
+        spectrum = compute_angular2_spectrum(*all_fkp, bin=bin, method=method)
+        del all_fkp
+        spectrum = spectrum.clone(norm=norm, num_shotnoise=num_shotnoise, attrs=attrs)
+
+        jax.block_until_ready(spectrum)
+        if jax.process_index() == 0:
+            logger.info('Angular computation finished')
+
+        results = {'raw': spectrum}
+
+    return results
