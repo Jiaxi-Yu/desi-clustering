@@ -4,10 +4,6 @@ Script to create and spawn desipipe tasks to compute clustering measurements on 
 To create and spawn the tasks on NERSC, use the following commands:
 ```bash
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
-python desipipe_box_mocks.py         # create the list of tasks
-desipipe tasks -q box_mocks          # check the list of tasks
-desipipe spawn -q box_mocks --spawn  # spawn the jobs
-desipipe queues -q box_mocks         # check the queue
 ```
 """
 import os
@@ -60,7 +56,8 @@ def run_stats(tracer='LRG', hod='base', version='abacus-hf-v2', analysis='box', 
     for imock in imocks:
         for zsnap in zsnaps:
             options = dict(catalog=dict(version=version, tracer=tracer, zsnap=zsnap, hod=hod, los=los, imock=imock))
-            options['mesh3_spectrum'] = dict(basis='sugiyama', ells=[(0, 0, 0), (0, 2, 2), (1, 1, 0), (1, 1, 2), (2, 2, 0), (2, 2, 2)], mask_edges=['edge1[:, 1] <= nyq / 2.', 'edge2[:, 1] <= nyq / 2.'], buffer_size=31, mattrs={'meshsize': 400})
+            #options['mesh3_spectrum'] = dict(basis='sugiyama', ells=[(0, 0, 0), (0, 2, 2), (1, 1, 0), (1, 1, 2), (2, 2, 0), (2, 2, 2)], mask_edges=['edge1[:, 1] <= nyq / 2.', 'edge2[:, 1] <= nyq / 2.'], buffer_size=31, mattrs={'meshsize': 400})
+            options['mesh3_spectrum'] = dict(basis='scoccimarro', ells=[0, 2], mattrs={'meshsize': 320}, buffer_size=34, edges={'step': 0.01}, mask_edges=['(mid3 >= jnp.abs(mid1 - mid2)) & (mid3 <= jnp.abs(mid1 + mid2))', 'edge1[:, 1] <= nyq * 2. / 3.', 'edge2[:, 1] <= nyq * 2. / 3.', 'edge2[:, 1] <= nyq * 2. / 3.'])
             options = fill_box_fiducial_options(options)
             compute_box_stats_from_options(stats, get_box_stats_fn=get_box_stats_fn, cache=cache, **options)
 
@@ -76,10 +73,10 @@ if __name__ == '__main__':
     stats_dir  = tools.base_stats_dir
 
     # run 
-    stats    = ['mesh2_spectrum', 'mesh3_spectrum']
+    stats    = ['mesh2_spectrum', 'mesh3_spectrum'][1:]
     analysis = 'full_shape'
     project  = f'{analysis}/box_window_function_validation'
-    tracers  = ['LRG', 'ELG', 'QSO'][-1:]
+    tracers  = ['LRG', 'ELG', 'QSO'][1:]
     los = 'z'
     max_mocks_per_batch = 50
     

@@ -75,7 +75,8 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None, 
                               'auw': None}
             window_mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None}
-            mesh3_spectrum = {'auw': None}
+            #mesh3_spectrum = {'auw': None}
+            mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
             window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
             particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 40., 41), mu=(np.linspace(-1., 1., 201), 'midpoint'))}
             particle3_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 20., 21), pole=(list(range(6)), 'firstpoint'))}
@@ -120,15 +121,15 @@ if __name__ == '__main__':
     # version = 'abacus-2ndgen-dr2-altmtl'
     check_for_existing_measurements = False
 
-    imocks = np.arange(25)
+    imocks = np.arange(6, 25)
     #imocks = np.arange(5, 25)
     #imocks = np.arange(5, 9)
     #imocks = np.arange(1)
-    imocks = [0]
+    #imocks = [0]
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
-    tracers = ['LRG', 'ELG', 'QSO']
+    tracers = ['LRG', 'ELG', 'QSO'][1:]
     #tracers = ['LRG']
     #tracers = ['QSO']
 
@@ -139,8 +140,8 @@ if __name__ == '__main__':
     # run data_splits for lensing group with full_shape setup 
     #stats = ['mesh2_spectrum', 'mesh3_spectrum']
     #stats = ['window_mesh2_spectrum', 'window_mesh3_spectrum']
-    stats = ['mesh2_spectrum', 'window_mesh2_spectrum']
-    #stats = ['mesh3_spectrum', 'window_mesh3_spectrum'][:0]
+    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum']
+    stats = ['mesh3_spectrum', 'window_mesh3_spectrum'][:1]
     #stats = ['particle3_correlation']
     postprocess = ['combine_regions'][:0]
     analysis = 'full_shape'
