@@ -11,6 +11,7 @@ Main functions
 """
 
 import os
+import re
 import time
 import logging
 from pathlib import Path
@@ -513,6 +514,11 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
         propose_fiducial['mesh3_spectrum'].update(norm={'cellsize': 10.}, ells=[(0, 0, 0), (2, 0, 2)], basis='sugiyama-diagonal', selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
         propose_fiducial['particle2_correlation'].update(battrs={'s': np.linspace(0., 180., 181), 'mu': (np.linspace(-1., 1., 201), 'midpoint')})
         propose_fiducial['particle3_correlation'].update(battrs={'s': np.linspace(0., 160., 21), 'pole': (list(range(6)), 'firstpoint')}, selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
+
+    # No angular integral constraint by default; set e.g. aic='hp64' per statistic to renormalize
+    # the randoms over the data in each healpix pixel
+    for stat in ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum']:
+        propose_fiducial[stat].setdefault('aic', None)
 
     # Angular statistics: 'mattrs' is the angular geometry ('ellmax', 'nside'), not a 3D mesh -- the
     # radial information is projected out and the routines lay the particles out on a coarse mesh of
@@ -1372,7 +1378,7 @@ def _decode_catalog_options(kwargs):
 
 
 def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', project='', kind='mesh2_spectrum',
-                 auw=None, cut=None, extra='', ext='h5', **kwargs):
+                 auw=None, cut=None, aic=None, extra='', ext='h5', **kwargs):
     """
     Return measurement filename for given parameters.
 
@@ -1396,6 +1402,8 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
         Whether to include angular upweighting.
     cut : bool, optional
         Whether to include theta cut.
+    aic : str, optional
+        Angular integral constraint applied to the randoms, e.g. 'hp64', see :func:`renormalize_randoms_over_data_aic`.
     weight : str
         Weight type. Options are 'default-FKP', 'defaut-FKP-bitwise', etc.
     imock : int, str, list of int, optional
@@ -1446,6 +1454,7 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
     weight = join_tracers(check_is_not_none('weight'))
     auw = '_auw' if auw else ''
     cut = '_thetacut' if cut else ''
+    aic = f'_aic-{aic}' if aic else ''
     extra = f'_{extra}' if extra else ''
 
     battrs = kwargs.get('battrs', None)
@@ -1483,7 +1492,7 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
                 templates = [templates]
             templates = '-'.join(['syst'] + list(templates))
             extra = f'{extra}-{templates}' if extra else f'_{templates}'
-    basename = f'{kind}_{tracer}{zrange}_{region}_weight-{weight}{auw}{cut}{extra}{imock}.{ext}'
+    basename = f'{kind}_{tracer}{zrange}_{region}_weight-{weight}{aic}{auw}{cut}{extra}{imock}.{ext}'
     return stats_dir / basename
 
 
@@ -2714,8 +2723,15 @@ def check_if_requires_renormalization(weight='', **kwargs):
     return 'compondata' in weight
 
 
-def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
-    """Renormalize randoms / data in each region."""
+def renormalize_randoms_over_data_regions(randoms, data, tracer=None, regions=None):
+    """
+    Renormalize randoms / data in each region.
+
+    Returns
+    -------
+    randoms : Catalog
+        A shallow copy of ``randoms``, with a rescaled 'INDWEIGHT'; the input is left untouched.
+    """
     sum_data_weights, sum_randoms_weights = [], []
     if regions is None:
         regions = get_renormalization_regions(tracer)
@@ -2727,9 +2743,82 @@ def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
 
     sum_data_weights, sum_randoms_weights = np.array(sum_data_weights), np.array(sum_randoms_weights)
     alphas = sum_data_weights / sum_randoms_weights / (sum(sum_data_weights) / sum(sum_randoms_weights))
+    # build the new weights before attaching them, so the input array is never written to
+    weights = randoms['INDWEIGHT'].copy()
     for region, alpha in zip(regions, alphas):
         mask_randoms = select_region(randoms['RA'], randoms['DEC'], region=region)
-        randoms['INDWEIGHT'][mask_randoms] *= alpha
+        weights[mask_randoms] *= alpha
+    randoms = randoms.copy()
+    randoms['INDWEIGHT'] = weights
+    return randoms
+
+
+def renormalize_randoms_over_data_aic(randoms, data, nside=None, aic=None):
+    """
+    Renormalize randoms / data in each healpix pixel.
+
+    The randoms weights are rescaled, pixel by pixel, so that the local randoms-to-data ratio matches
+    the global one. This projects out the angular density fluctuations resolved at ``nside``.
+
+    Pixels holding randoms but no data get a zero weight -- there is no data there to trace. Pixels
+    holding data but no randoms cannot be renormalized and are left alone.
+
+    Parameters
+    ----------
+    randoms : Catalog
+        Catalog of randoms.
+    data : Catalog
+        Data catalog.
+    nside : int, optional
+        Healpix resolution of the renormalization pixels. Default is 64 (~1 deg pixels).
+    aic : str, optional
+        Angular integral constraint specification, e.g. 'hp64', as an alternative way of giving
+        ``nside``. Providing both is only allowed if they agree.
+
+    Returns
+    -------
+    randoms : Catalog
+        A shallow copy of ``randoms``, with a rescaled 'INDWEIGHT'; the input is left untouched.
+
+    Notes
+    -----
+    Pixelization follows the nested scheme. The scheme only relabels pixels,
+    so the renormalization itself is unchanged by it, as long as data and randoms share it.
+    """
+    import healpy as hp
+
+    if aic is not None:
+        match = re.fullmatch(r'hp(\d+)', str(aic))
+        if match is None:
+            raise ValueError(f"unknown angular integral constraint {aic!r}; expected e.g. 'hp64'")
+        aic_nside = int(match.group(1))
+        if nside is not None and nside != aic_nside:
+            raise ValueError(f'conflicting resolutions: nside={nside} and aic={aic!r} (nside={aic_nside})')
+        nside = aic_nside
+    if nside is None:
+        nside = 64
+
+    npix = 12 * nside**2
+    mpicomm = getattr(data, 'mpicomm', None)
+
+    def sum_weights_per_pixel(catalog):
+        pixels = hp.ang2pix(nside, catalog['RA'], catalog['DEC'], nest=True, lonlat=True)
+        sum_weights = np.bincount(pixels, weights=catalog['INDWEIGHT'], minlength=npix)
+        if mpicomm is not None:
+            sum_weights = mpicomm.allreduce(sum_weights)
+        return pixels, sum_weights
+
+    pixels_data, sum_data_weights = sum_weights_per_pixel(data)
+    pixels_randoms, sum_randoms_weights = sum_weights_per_pixel(randoms)
+
+    # local ratio, normalized to the global one, so the total randoms weight is preserved
+    alphas = np.divide(sum_data_weights, sum_randoms_weights, out=np.zeros_like(sum_data_weights),
+                       where=sum_randoms_weights != 0.)
+    alphas /= sum_data_weights.sum() / sum_randoms_weights.sum()
+    randoms = randoms.copy()
+    randoms['INDWEIGHT'] = randoms['INDWEIGHT'] * alphas[pixels_randoms]
+    return randoms
+
 
 
 def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=()):

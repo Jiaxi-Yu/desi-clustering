@@ -63,7 +63,7 @@ def _digitize_cartesian(particles, wattrs, cellsize=40., sharding_mesh=None):
     return particles.clone(positions=index_positions[mask], weights=index_weights[mask], index_value=None, exchange=False)
 
 
-def compute_particle3_angular_upweights(*get_data_randoms):
+def compute_particle3_angular_upweights(*get_data_randoms, aic=None):
     """
     Compute angular upweights (AUW) from fibered and parent data catalogs.
 
@@ -86,7 +86,7 @@ def compute_particle3_angular_upweights(*get_data_randoms):
     from lsstypes import ObservableLeaf, ObservableTree
 
     with create_sharding_mesh() as sharding_mesh:
-        all_particles = prepare_cucount_particles(*get_data_randoms, positions_type='rd')
+        all_particles = prepare_cucount_particles(*get_data_randoms, positions_type='rd', aic=aic)
         all_particles_fibered, all_particles_parent = [], []
         for particles in all_particles:
             all_particles_fibered.append({'data': particles['fibered_data'], 'randoms': particles['fibered_randoms']})

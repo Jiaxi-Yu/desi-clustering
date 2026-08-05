@@ -23,14 +23,14 @@ from jax import numpy as jnp
 from jax.sharding import PartitionSpec as P
 import lsstypes as types
 
-from .tools import default_mpicomm, _format_bitweights, compute_fkp_effective_redshift, combine_stats
+from .tools import default_mpicomm, _format_bitweights, compute_fkp_effective_redshift, combine_stats, renormalize_randoms_over_data_aic
 
 
 logger = logging.getLogger('spectrum2')
 
 
 @default_mpicomm
-def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, add_data=tuple(), add_randoms=tuple(), check=True, **kwargs):
+def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, add_data=tuple(), add_randoms=tuple(), check=True, aic=None, **kwargs):
     """
     Prepare :class:`jaxpower.ParticleField` objects from data and randoms catalogs.
 
@@ -42,6 +42,12 @@ def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, add_data=tuple(),
         for randoms IDs to allow process-invariant random split in bispectrum normalization.
     mattrs : dict, optional
         Mesh attributes ('boxsize', 'meshsize' or 'cellsize', 'boxcenter') to define the :class:`ParticleField` objects. If ``None``, default attributes are used.
+    aic : str, optional
+        Angular integral constraint, e.g. 'hp64': renormalize the randoms over the data in each healpix
+        pixel, see :func:`tools.renormalize_randoms_over_data_aic`. Applied to every non-'data' catalog
+        ('randoms', and 'shifted' when present, whose R.A./Dec. are the unshifted ones), so all legs
+        share the same pixel weights. ``None`` (default) leaves the catalogs untouched, which is what
+        every caller that does not ask for it -- reconstruction in particular -- relies on.
     kwargs : dict, optional
         Additional keyword arguments to pass to :class:`ParticleField`.
 
@@ -59,6 +65,13 @@ def prepare_jaxpower_particles(*get_data_randoms, mattrs=None, add_data=tuple(),
 
     # Load all catalogs by calling the provided functions
     all_catalogs = [_get_data_randoms() for _get_data_randoms in get_data_randoms]
+
+    if aic is not None:
+        # Angular integral constraint: renormalize randoms over data in each healpix pixel
+        for catalogs in all_catalogs:
+            for name, catalog in list(catalogs.items()):
+                if name == 'data' or catalog is None: continue
+                catalogs[name] = renormalize_randoms_over_data_aic(catalog, catalogs['data'], aic=aic)
 
     # Define the mesh attributes; pass in positions only
     # check=True validates that all positions are within mesh bounds
@@ -374,7 +387,7 @@ def loop_over_optimal_weights(ells, compute, join):
     return join(results)
 
 
-def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
+def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None, aic=None,
                            ells=(0, 2, 4), edges=None, los='firstpoint', optimal_weights=None,
                            norm: dict=None, cache=None):
     r"""
@@ -431,7 +444,7 @@ def compute_mesh2_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
     with create_sharding_mesh(meshsize=mattrs.get('meshsize', None)):
         # Load particles and prepare for FKP field creation
         # add_data=['BITWEIGHT'] for fiber collision corrections
-        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, add_data=['BITWEIGHT'] + columns_optimal_weights, add_randoms=columns_optimal_weights)
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, aic=aic, add_data=['BITWEIGHT'] + columns_optimal_weights, add_randoms=columns_optimal_weights)
 
         # Initialize or retrieve cached binning object from previous runs
         if cache is None: cache = {}
@@ -2650,7 +2663,7 @@ def compute_covariance_box_mesh2_spectrum(theory: types.Mesh2SpectrumPoles=None,
     return covariance
 
 
-def compute_angular2_spectrum(*get_data_randoms, mattrs=None, edges=None,
+def compute_angular2_spectrum(*get_data_randoms, mattrs=None, edges=None, aic=None,
                               method=None, norm: dict=None, cache=None):
     r"""
     Compute the angular power spectrum :math:`C_\ell` from FKP fields with :mod:`jaxpower`.
@@ -2701,7 +2714,7 @@ def compute_angular2_spectrum(*get_data_randoms, mattrs=None, edges=None,
     with create_sharding_mesh():
         # Load particles; positions are read as directions by the angular estimator. The mesh only
         # lays them out (and shards them) and is of no consequence here, so keep it coarse
-        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.))
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.), aic=aic)
         # Attributes about the estimation (total weights, mesh geometry)
         attrs = _get_jaxpower_attrs(*all_particles)
 

@@ -19,13 +19,13 @@ from jax import numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 import lsstypes as types
-from .tools import _format_bitweights
+from .tools import _format_bitweights, renormalize_randoms_over_data_aic
 
 
 logger = logging.getLogger('particle2_correlation')
 
 
-def compute_particle2_angular_upweights(*get_data, battrs=None):
+def compute_particle2_angular_upweights(*get_data, battrs=None, aic=None):
     """
     Compute angular upweights (AUW) from fibered and parent data catalogs.
 
@@ -44,7 +44,7 @@ def compute_particle2_angular_upweights(*get_data, battrs=None):
     from lsstypes import ObservableLeaf, ObservableTree
 
     with create_sharding_mesh():
-        all_particles = prepare_cucount_particles(*get_data, positions_type='rd')
+        all_particles = prepare_cucount_particles(*get_data, positions_type='rd', aic=aic)
         all_fibered_particles = [{'data': particles['fibered_data']} for particles in all_particles]
         all_parent_particles = [{'data': particles['parent_data']} for particles in all_particles]
         if jax.process_index() == 0:
@@ -69,7 +69,7 @@ def compute_particle2_angular_upweights(*get_data, battrs=None):
     return ObservableTree(list(auw.values()), pairs=list(auw.keys()))
 
 
-def prepare_cucount_particles(*get_data_randoms, positions_type='pos', subsampler=None, jackknife=None, split_randoms=False, concatenate=False, wattrs=None):
+def prepare_cucount_particles(*get_data_randoms, positions_type='pos', subsampler=None, jackknife=None, split_randoms=False, concatenate=False, wattrs=None, aic=None):
     """
     Convert catalogs to :class:`cucount.Particles`.
 
@@ -90,6 +90,11 @@ def prepare_cucount_particles(*get_data_randoms, positions_type='pos', subsample
         If ``True``, return concatenated randoms or shifted catalogs.
     wattrs : WeightAttrs, optional
         Weight attributes passed to :class:`KMeansSubsampler`.
+    aic : str, optional
+        Angular integral constraint, e.g. 'hp64': renormalize the randoms over the data in each healpix
+        pixel, see :func:`tools.renormalize_randoms_over_data_aic`. Each non-data catalog is
+        renormalized over its own data counterpart ('fibered_randoms' over 'fibered_data', and so on,
+        falling back to 'data'), so all catalogs of a set share the same pixel weights.
 
     Returns
     -------
@@ -180,6 +185,18 @@ def prepare_cucount_particles(*get_data_randoms, positions_type='pos', subsample
     all_particles = []
     for _get_data_randoms in get_data_randoms:
         catalogs = _get_data_randoms()
+        if aic is not None:
+            # Angular integral constraint: renormalize randoms over data in each healpix pixel
+            for name, catalog in list(catalogs.items()):
+                if name.endswith('data') or catalog is None: continue
+                # each randoms-like catalog against its own data counterpart ('fibered_randoms' over
+                # 'fibered_data'); anything else ('shifted') against the plain data -- note a bare
+                # name.replace would map 'shifted' onto itself, silently renormalizing it by itself
+                reference = catalogs.get(name.replace('randoms', 'data') if 'randoms' in name else 'data', None)
+                if reference is None: continue
+                renormalized = [renormalize_randoms_over_data_aic(_catalog, reference, aic=aic)
+                                for _catalog in (catalog if _is_list(catalog) else [catalog])]
+                catalogs[name] = renormalized if _is_list(catalog) else renormalized[0]
         data_size = catalogs['data'].csize if 'data' in catalogs else None
         particles = {}
         for name, catalog in catalogs.items():

@@ -111,7 +111,7 @@ def _apply_mesh3_spectrum_close_pair_correction(spectrum, correction):
     return spectrum.clone(value=spectrum.value() + value)
 
 
-def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
+def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None, aic=None,
                             basis='sugiyama-diagonal', ells=[(0, 0, 0), (2, 0, 2)], edges=None, los='local',
                             buffer_size=0, norm: dict=None, cache=None):
     r"""
@@ -155,7 +155,7 @@ def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
     # Set up distributed computation mesh across JAX devices
     with create_sharding_mesh(meshsize=mattrs.get('meshsize', None)) as sharding_mesh:
         # Load and prepare particle catalogs (data and randoms) with IDS for reproducibility (random splitting based on object IDs)
-        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, add_randoms=['IDS'])
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, aic=aic, add_randoms=['IDS'])
         # Attributes about the estimation
         attrs = _get_jaxpower_attrs(*all_particles)
         # Set line-of-sight direction in attributes
@@ -1564,7 +1564,7 @@ def compute_covariance_box_mesh3_spectrum(spectrum2: types.Mesh2SpectrumPoles, s
                                                   shotnoise=shotnoise, cache={})
     return covariance
 
-def compute_angular3_spectrum(*get_data_randoms, mattrs=None, edges=None,
+def compute_angular3_spectrum(*get_data_randoms, mattrs=None, edges=None, aic=None,
                               method=None, norm: dict=None, cache=None):
     r"""
     Compute the angular bispectrum :math:`b_{\ell_1 \ell_2 \ell_3}`, binned in :math:`\ell`-bands,
@@ -1614,7 +1614,7 @@ def compute_angular3_spectrum(*get_data_randoms, mattrs=None, edges=None,
     with create_sharding_mesh():
         # IDS give a process-invariant random split for the normalization. The mesh only lays the
         # particles out (and shards them) and is of no consequence here, so keep it coarse
-        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.), add_randoms=['IDS'])
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.), aic=aic, add_randoms=['IDS'])
         # Attributes about the estimation (total weights, mesh geometry)
         attrs = _get_jaxpower_attrs(*all_particles)
 

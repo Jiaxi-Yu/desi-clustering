@@ -384,8 +384,7 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                 raw_randoms[tracer] = raw_randoms_unmatched
             randoms[tracer] = prepare_catalog(raw_randoms[tracer], kind='randoms', **_catalog_options)
             if tools.check_if_requires_renormalization(**_catalog_options):
-                for random in randoms[tracer]:
-                    tools.renormalize_randoms_over_data(random, data[tracer], tracer=tracer)
+                randoms[tracer] = [tools.renormalize_randoms_over_data_regions(random, data[tracer], tracer=tracer) for random in randoms[tracer]]
             catalog_options[tracer]['binned_weight'] = binned_weight  # store binned weight info in catalog options for later use in stats computation
             output_catalog_options[tracer]['binned_weight'] = binned_weight
 
@@ -450,6 +449,9 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             # FIXME: how to generalize to any stat (correlation) or OQE weights?
             spectrum_options = options[f'mesh{npt:d}_spectrum']
             selection_weights = spectrum_options.get('selection_weights', None)
+            # Angular integral constraint: the upweights must be built from the same randoms as the
+            # statistic they correct, so pass it on (prepare_cucount_particles applies it)
+            aic = spectrum_options.get('aic', None)
             _cache_auw = {}
 
             def get_data(tracer, _cache_auw=_cache_auw):
@@ -470,8 +472,8 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                         if 'randoms' in kind:
                             _cache_auw[kind, tracer] = prepare_catalog(raw_randoms[tracer], kind=kind, **_catalog_options)
                             if tools.check_if_requires_renormalization(**_catalog_options):
-                                for random in _cache_auw[kind, tracer]:
-                                    tools.renormalize_randoms_over_data(random, _cache_auw[kind.replace('randoms', 'data'), tracer], tracer=tracer)
+                                _cache_auw[kind, tracer] = [tools.renormalize_randoms_over_data_regions(random, _cache_auw[kind.replace('randoms', 'data'), tracer], tracer=tracer)
+                                                            for random in _cache_auw[kind, tracer]]
                         else:
                             _cache_auw[kind, tracer] = prepare_catalog(raw_full_data[tracer], kind=kind, **_catalog_options)
 
@@ -481,11 +483,11 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             stats_npt = [stat for stat in stats if any(name in stat for name in [f'mesh{npt:d}', f'particle{npt:d}']) and options[stat].get('auw', False)]
             if any(stats_npt):
                 # Compute angular upweights from fibered vs parent catalogs
-                fn = get_stats_fn(kind=f'particle{npt:d}_angular_upweights', catalog=fn_catalog_options)
+                fn = get_stats_fn(kind=f'particle{npt:d}_angular_upweights', catalog=fn_catalog_options, aic=aic)
                 if False: #fn.exists():
                     auw = types.read(fn)
                 else:
-                    auw = func(*[functools.partial(get_data, tracer) for tracer in tracers])
+                    auw = func(*[functools.partial(get_data, tracer) for tracer in tracers], aic=aic)
                     # Write computed angular upweights to disk
                     write_stats(fn, auw)
                 # Update all statistics options with computed angular upweights
@@ -568,6 +570,9 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
                     spectrum_options = dict(options[stat]) | dict(auw=auw_options.get(stat, None))
                     # Extract selection weights if provided (e.g., NX**(-1. / 3.) weighting)
                     selection_weights = spectrum_options.pop('selection_weights', None)
+                    # Note the angular integral constraint ('aic') needs no handling here: it is a
+                    # normal option of the compute functions, applied by prepare_jaxpower_particles,
+                    # and reaches get_stats_fn with the rest of spectrum_options.
 
                     def get_data(tracer):
                         # Prepare data for spectrum measurement
