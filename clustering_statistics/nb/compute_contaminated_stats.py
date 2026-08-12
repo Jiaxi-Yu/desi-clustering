@@ -86,7 +86,7 @@ def compute_weight_sys_map(tracer='ELG_LOPnotqso', imweight='WEIGHT_SYS', nside=
     If ``gaussian``, the map is replaced by a Gaussian realization with the same angular
     power spectrum, footprint mean and variance (see :func:`gaussianize_sys_map`).
     """
-    if True:
+    if False:
         fns = [data_cat_dir / f'LRG_{region}_clustering.dat.fits' for region in ['NGC', 'SGC']]
         data = tools._read_catalog(fns, mpicomm=MPI.COMM_SELF)
         #data = data[(data['Z'] > 0.4) & (data['Z'] < 0.6)]
@@ -134,7 +134,7 @@ def add_cont_columns(catalog, wsys_map):
     return catalog
 
 
-def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS', contweight='CONT',
+def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'), imweight='WEIGHT_SYS', contweight='CONT',
               region='NGC', imocks=(0,), tracer='ELG_LOPnotqso', zranges=((1.1, 1.6),), analysis='full_shape',
               complete=None, gaussian=False):
     """
@@ -150,7 +150,7 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS',
     zranges = [tuple(zrange) for zrange in zranges]
     cache = {}
     wsys_map = get_weight_sys_map(tracer=tracer, imweight=imweight, gaussian=gaussian)
-    imweight = f'{imweight}-LRG'
+    imweight = f'{imweight}'
     if gaussian:
         imweight = f'{imweight}-gaussian'  # file name tag only; catalog columns are unchanged
 
@@ -175,8 +175,8 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS',
         if kind == 'data':
             state['data'] = catalogs
         elif kind == 'randoms':
-            for randoms in catalogs:
-                tools.renormalize_randoms_over_data(randoms, state['data'], regions=norm_regions)
+            for i, randoms in enumerate(catalogs):
+                catalogs[i] = tools.renormalize_randoms_over_data_regions(randoms, state['data'], regions=norm_regions)
         return catalogs
 
     onthefly = None
@@ -185,9 +185,15 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum'), imweight='WEIGHT_SYS',
     _get_stats_fn = functools.partial(get_stats_fn, stats_dir=stats_dir, project=project, imweight=imweight, onthefly=onthefly)
 
     for imock in imocks:
+        aic = None #'hp64'
         options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region,
                                     weight=f'default-FKP-wsys-{contweight}', imock=imock),
-                       mesh2_spectrum={'auw': False, 'cut': False}, mesh3_spectrum={'auw': False},
+                       mesh2_spectrum={'auw': False, 'cut': False, 'aic': aic}, mesh3_spectrum={'auw': False, 'aic': aic},
+                       # Angular statistics: imaging systematics are an angular contamination, so
+                       # these probe it directly. 'mattrs' is the angular geometry, ellmax = 180 ~ 1 deg;
+                       # nside = None on the power spectrum selects the pixel-free direct summation.
+                       angular2_spectrum={'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': {'min': 1, 'step': 1}},
+                       angular3_spectrum={'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': [1, 4, 10, 20, 44, 79, 124, 178]},
                        window_mesh2_spectrum={'cut': False}, window_mesh3_spectrum={})
         options = fill_fiducial_options(options, analysis=analysis)
         for itracer in options['catalog']:
@@ -210,17 +216,17 @@ if __name__ == '__main__':
     setup_logging()
 
     imweights = ['WEIGHT_SYS']
-    contweights = ['CONT']
     complete = None
     #complete = {}  # on-the-fly complete catalogs
     #complete = {'altmtl': True}  # on-the-fly altmtl catalogs
-    gaussian = False  # if True, contaminate with a Gaussian map following the imweight map's spectrum
     tracer = 'QSO'
     zranges = [(0.8, 2.1)]
     #tracer = 'LRG'
-    #zranges = [(0.4, 0.6)]
+    #zranges = [(0.4, 1.1)]
+    #tracer = 'LRG'
+    #zranges = [(0.8, 1.1)]
     for imweight in imweights:
-        for contweight in contweights:
-            for region in ['NGC', 'SGC'][:1]:
-                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum'], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
+        for contweight, gaussian in zip(['SYS', 'CONT', 'CONT'], [False, False, True][:1]):
+            for region in ['NGC', 'SGC']:
+                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'][:2], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
                 #run_stats(stats=['window_mesh2_spectrum', 'window_mesh3_spectrum'], imweight=imweight, contweight=contweight, region=region, imocks=[0], complete=complete, gaussian=gaussian)

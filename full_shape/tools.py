@@ -14,6 +14,13 @@ Dictionary of options are organized as follows:
 - each of observable1, observable2, ... is a dictionary that specifies how to build the desilike
 observable (data, theory, window): ``{'stat': {'kind': ..., 'basis': ..., 'select': [...]},
 'catalog': {'version':, ...}, 'theory': {'model': ...}, 'window': {}}``.
+
+Optional per-observable key ``'redshift_smearing'`` (default: absent, no smearing), either a
+mode string or ``{'mode': ..., **kw}`` where the remaining keys locate the PDF through
+``get_stats_fn`` (e.g. ``{'mode': 'pdf', 'version': 'data-dr2-v2'}``). ``'pdf'`` folds the
+measured redshift-error PDF into the window matrix; ``'pdf+gauss'`` / ``'pdf+lor'``
+additionally give the theory a parametric damping with a free ``vsmear`` [Mpc/h], which
+folpsD / folpsEFT alone support. Normalised once in :func:`fill_fiducial_observable_options`.
 """
 
 import os
@@ -137,11 +144,20 @@ def get_cosmology(cosmology_options: dict=None):
     if has_w0wa:
         params['w0_fld'].update(fixed=is_fixed_model)
         params['wa_fld'].update(fixed=is_fixed_model)
-    params.set(Parameter('H0', derived=True, latex='H_0'))
-    params.set(Parameter('Omega_m', derived=True, latex=r'\Omega_\mathrm{m}'))
-    params.set(Parameter('sigma8_m', derived=True, latex=r'\sigma_{8,\mathrm{m}}'))
-    params.set(Parameter('sigma8_cb', derived=True, latex=r'\sigma_{8,\mathrm{cb}}'))
-    params.set(Parameter('rs_drag', derived=True, latex=r'r_s'))
+    # H0 and Omega_m follow from the sampled parameters alone; sigma8_m, sigma8_cb and rs_drag
+    # each require a Boltzmann section (fourier, thermodynamics) to be run. Restrict the set with
+    # cosmology_options['derived'] --- comet needs none of the sections, so asking for sigma8 /
+    # rs_drag there would only add a computation the theory itself never uses.
+    derived = {'H0': 'H_0', 'Omega_m': r'\Omega_\mathrm{m}', 'sigma8_m': r'\sigma_{8,\mathrm{m}}',
+               'sigma8_cb': r'\sigma_{8,\mathrm{cb}}', 'rs_drag': 'r_s'}
+    requested = cosmology_options.get('derived', None)
+    if requested is not None:
+        unknown = [name for name in requested if name not in derived]
+        if unknown:
+            raise ValueError(f'unknown derived cosmology parameters {unknown}; choose from {list(derived)}')
+        derived = {name: derived[name] for name in requested}
+    for name, latex in derived.items():
+        params.set(Parameter(name, derived=True, latex=latex))
     cosmo = CosmoprimoCosmology(engine=cosmology_options.get('engine', 'class'), fiducial=fiducial, params=params)
     return cosmo
 
@@ -293,7 +309,10 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
                 param.update(**config)
     elif 'comet' in model:
         if marg:
-            for param in params.select(basename=['a[0:5]', 'NP*']):
+            # 'a[0:5]' / 'NP*' are comet's own (standard-basis) names; under a physical basis it
+            # exposes folps' names instead --- alpha0/2/4, sn2, plus the comet-only sn22 --- so
+            # select both sets to marginalize the same sector as folps in either basis.
+            for param in params.select(basename=['a[0:5]', 'NP*', 'alpha*', 'sn2', 'sn4', 'sn22']):
                 param.update(derived='marg')
         if user_params:
             configs = configs | user_params
@@ -304,7 +323,8 @@ def update_theory_nuisance_priors(params, model, stat, prior_basis, coevolution=
 
 
 @default_mpicomm
-def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_attrs: dict=None, data=None, mpicomm=None):
+def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_attrs: dict=None, data=None,
+               redshift_smearing: str=None, mpicomm=None):
     """
     Return a configured theory desilike calculator for the requested statistic.
 
@@ -318,6 +338,11 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
         Cosmology calculator.
     data_attrs : dict
         Data attributes ('z', 'recon_mode', 'recon_smoothing_radius', 'tracers', ...).
+    redshift_smearing : str, dict, optional
+        Redshift-smearing option, see :func:`_format_redshift_smearing`. The measured PDF
+        ('pdf') is folded into the window in :func:`get_stats`, not here; only the parametric
+        part of 'pdf+gauss' / 'pdf+lor' is handled, as a kernel with a free ``vsmear``
+        [Mpc/h] passed to the theory. Supported by folpsD / folpsEFT only.
 
     Returns
     -------
@@ -331,6 +356,12 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
     from desilike.theories.galaxy_clustering.full_shape import get_physical_stochastic_settings
     from desilike.base import params as get_params
     theory_options = dict(theory_options)
+    # 'pdf' alone is entirely in the window; only the parametric suffix reaches the theory.
+    smearing_form = _get_redshift_smearing_form(redshift_smearing)
+    if smearing_form is not None and theory_options['model'] not in ['folpsD', 'folpsEFT']:
+        raise NotImplementedError(f"redshift_smearing={redshift_smearing!r} adds a parametric damping, which "
+                                  f"model {theory_options['model']!r} does not support; use 'pdf' instead.")
+    smearing_kw = {'redshift_smearing': _get_redshift_smearing_kernel(smearing_form)} if smearing_form else {}
     fiducial = get_fiducial()
     template = None
     theory_options.setdefault('cosmology', {'template': 'direct'})
@@ -364,12 +395,19 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
             pt = FOLPSPTSpectrum2Poles(A_full=A_full)
             if theory_options['model'] == 'folpsD':
                 theory_options.setdefault('damping_method', 'tree+loop')
-            kw = {name: theory_options[name] for name in ['damping', 'damping_method', 'prior_basis'] if name in theory_options}
-            theory = FOLPSTracerSpectrum2Poles(template=template, pt=pt, tracers=tracers, **kw, **theory_options.get('options', {}))
+            # use_GTNS is forwarded so the EFT limit can be compared like-for-like with comet: at
+            # X_FoG = 0 there is no tree-level damping to resum GTNS, so folps' default (dropped
+            # for every 'tree+...' method) is not the model comet's 'EFT' evaluates, which keeps it.
+            kw = {name: theory_options[name] for name in ['damping', 'damping_method', 'use_GTNS', 'prior_basis'] if name in theory_options}
+            theory = FOLPSTracerSpectrum2Poles(template=template, pt=pt, tracers=tracers, **kw, **smearing_kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
-        elif theory_options['model'] in ['comet']:
+        elif theory_options['model'] in ['comet', 'cometEFT']:
             kw = {name: theory_options[name] for name in ['prior_basis'] if name in theory_options}
+            # 'comet' is comet's fitted velocity-dispersion kernel VDG_infty; 'cometEFT' the pure
+            # EFT model, whose FoG suppression is perturbative only (no avir) --- the counterpart
+            # of 'folpsEFT' (X_FoG fixed to 0).
+            kw['model'] = {'comet': 'VDG_infty', 'cometEFT': 'EFT'}[theory_options['model']]
             #pt = COMETPTSpectrum2Poles(cosmo=cosmology, z=z) # backend='numpy')
             #theory = COMETTracerSpectrum2Poles(pt=pt, tracers=tracers, **kw, **theory_options.get('options', {}))
             theory = COMETTracerSpectrum2Poles(cosmo=cosmology, tracers=tracers, z=z, **kw, **theory_options.get('options', {}))
@@ -378,11 +416,15 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
     elif 'mesh3_spectrum' in stat:
         if theory_options['model'] in ['folpsD', 'folpsEFT']:
             kw = {name: theory_options[name] for name in ['damping', 'A_full', 'prior_basis'] if name in theory_options}
-            theory = FOLPSTracerSpectrum3Poles(template=template, tracers=tracers, z=z, **kw, **theory_options.get('options', {}))
+            theory = FOLPSTracerSpectrum3Poles(template=template, tracers=tracers, z=z, **kw, **smearing_kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
-        elif theory_options['model'] in ['comet']:
+        elif theory_options['model'] in ['comet', 'cometEFT']:
             kw = {name: theory_options[name] for name in ['prior_basis'] if name in theory_options}
+            # 'comet' is comet's fitted velocity-dispersion kernel VDG_infty; 'cometEFT' the pure
+            # EFT model, whose FoG suppression is perturbative only (no avir) --- the counterpart
+            # of 'folpsEFT' (X_FoG fixed to 0).
+            kw['model'] = {'comet': 'VDG_infty', 'cometEFT': 'EFT'}[theory_options['model']]
             theory = COMETTracerSpectrum3Poles(cosmo=cosmology, tracers=tracers, **kw, **theory_options.get('options', {}))
             kw_stoch = get_physical_stochastic_settings(tracer=get_simple_tracer(tracers))
             theory.update(**kw_stoch, nbar=nbar, params=update_theory_nuisance_priors(get_params(theory, level=1), theory_options['model'], stat, kw['prior_basis'], marg=theory_options.get('marg', False), user_params=theory_options.get('params') or None))
@@ -555,9 +597,19 @@ def _get_prepared_cache_options(observables_options: list[dict], covariance_opti
         options.pop('theory_dk', None)
         return options
 
+    def redshift_smearing_options(observable_options):
+        # The cached window carries the measured PDF: key on the file-lookup keys, and on the
+        # part of the mode before '+', so 'pdf', 'pdf+gauss' and 'pdf+lor' -- which give the
+        # same window, differing only in the theory -- share one cached product.
+        redshift_smearing = _format_redshift_smearing(observable_options.get('redshift_smearing', None))
+        if redshift_smearing is None:
+            return {}
+        return {'redshift_smearing': redshift_smearing | {'mode': redshift_smearing['mode'].partition('+')[0]}}
+
     options = {'observables': [
         {name: dict(observable_options[name]) for name in ['stat', 'catalog']}
         | ({'window': window_options(observable_options)} if 'window' in observable_options else {})
+        | redshift_smearing_options(observable_options)
         for observable_options in observables_options
     ]}
     if kind == 'covariance':
@@ -884,6 +936,15 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
     no_window = all(mode == 'none' for mode in window_modes)
     if any(mode == 'none' for mode in window_modes) and not no_window:
         raise ValueError("window mode 'none' must be used for all observables in a likelihood")
+    # The measured PDF is folded into the window, so it needs a mesh spectrum window to fold into.
+    for iobs, (stat, labels, file_kw, kw) in enumerate(iter_stat_tracer_combinations(observables_options, with_stat_kw=True)):
+        if _format_redshift_smearing(observables_options[iobs].get('redshift_smearing', None)) is None:
+            continue
+        if window_modes[iobs] == 'none' or _stat_is_compressed(stat) or 'mesh' not in stat:
+            raise ValueError(f"redshift_smearing is not supported for {stat} with window mode "
+                             f"{window_modes[iobs]!r}: there is no mesh spectrum window to fold the PDF into. "
+                             "Pass a kernel to the theory instead, via the 'redshift_smearing' argument of "
+                             "FOLPSTracerSpectrum2Poles / FOLPSTracerSpectrum3Poles.")
     cache_data_fn = get_cache_fn('data', dict(imocks=all_imocks))
     cache_window_fn = None if no_window else get_cache_fn('window', dict(imocks=all_imocks))
     data = get_from_cache(cache_data_fn)
@@ -932,7 +993,22 @@ def get_stats(observables_options: list[dict], covariance_options: dict=None, un
                     #fn = _get_mock_stats_fn(f'window_{stat}', file_kw) if 'stats_dir' in file_kw else get_stats_fn(kind=f'window_{stat}', **file_kw)
                     fn = get_stats_fn(kind=f'window_{stat}', **file_kw)
                     logger.info(f"Reading window for {stat} from {fn}")
-                    windows.append(types.read(fn))
+                    window_matrix = types.read(fn)
+                    # Fold the measured redshift-error PDF in here, on the native theory grid:
+                    # the mixing matrix is block-diagonal in k, so it must be applied before
+                    # rebin_spectrum3_window / select_window_theory compact and trim it.
+                    redshift_smearing = _format_redshift_smearing(observables_options[iobs].get('redshift_smearing', None))
+                    if redshift_smearing is not None:
+                        smearing_kw = file_kw | {'stats_dir': base_stats_dir} | {name: value for name, value in redshift_smearing.items() if name != 'mode'}
+                        smearing_kw.pop('imock', None)
+                        smearing_fn = get_stats_fn(kind='redshift_smearing', **smearing_kw)
+                        if not os.path.exists(smearing_fn):
+                            context = ', '.join(f'{name}={file_kw[name]!r}' for name in ['tracer', 'zrange'] if name in file_kw)
+                            raise FileNotFoundError(f'No redshift-smearing PDF for {stat} ({context}); '
+                                                    f'resolved lookup: {smearing_fn}')
+                        logger.info(f"Reading redshift-smearing PDF for {stat} from {smearing_fn}")
+                        window_matrix = window_with_redshift_smearing(window_matrix, types.read(smearing_fn))
+                    windows.append(window_matrix)
             # Join mesh2_spectrum, mesh3_spectrum, etc.
             data = pack_stats(data, **joint_labels)
             window = None if no_window else pack_stats(windows, **joint_labels)
@@ -1158,6 +1234,246 @@ def rebin_spectrum3_window(window, data=None, theory_dk=None):
     return window
 
 
+def _format_redshift_smearing(redshift_smearing):
+    """Normalise the ``redshift_smearing`` option to ``{'mode': ..., **kw}``, or None.
+
+    Applied once, in :func:`fill_fiducial_observable_options`; idempotent, so the few places
+    that may receive a raw option (``get_stats``, ``get_theory`` called directly) can call it
+    defensively. A bare string is shorthand for ``{'mode': <string>}``; the remaining keys are
+    passed to :func:`~clustering_statistics.tools.get_stats_fn` to locate the PDF, and default
+    to the DR2 products.
+
+    'pdf' folds the measured P(dv) into the window; the '+gauss' / '+lor' suffixes additionally
+    give the theory a parametric kernel with a free vsmear, which only folpsD / folpsEFT accept.
+    """
+    if not redshift_smearing:
+        return None
+    if isinstance(redshift_smearing, str):
+        redshift_smearing = {'mode': redshift_smearing}
+    redshift_smearing = dict(redshift_smearing)
+    allowed_modes = ('pdf', 'pdf+gauss', 'pdf+lor')
+    mode = redshift_smearing.get('mode', None)
+    if mode not in allowed_modes:
+        raise ValueError(f'redshift_smearing mode must be one of {list(allowed_modes)}, got {mode!r}')
+    # the PDF depends on tracer and zrange only, so region is pinned to the one that was produced
+    return {'project': 'auxiliary_data/redshift_smearing', 'version': 'data-dr2-v2', 'region': 'GCcomb'} | redshift_smearing
+
+
+def _get_redshift_smearing_form(redshift_smearing):
+    """Parametric damping form ('gauss', 'lor') of a formatted option, or None."""
+    redshift_smearing = _format_redshift_smearing(redshift_smearing)
+    if redshift_smearing is None:
+        return None
+    return redshift_smearing['mode'].partition('+')[2] or None
+
+
+def _get_redshift_smearing_kernel(form):
+    """Parametric single-field damping D(k mu), carrying its own free ``vsmear`` [Mpc/h].
+
+    Follows desilike's ``redshift_smearing`` protocol: a jax-traceable ``fun(kmu, *values)``
+    whose ``params`` are attached to the theory, which then composes the kernel per statistic
+    (``D^2`` for the power spectrum, ``D(k1 mu1) D(k2 mu2) D(k3 mu3)`` for the bispectrum).
+    """
+    import jax.numpy as jnp
+    from desilike.parameter import Parameter
+
+    if form == 'gauss':
+        def fun(kmu, vsmear):
+            return jnp.exp(-(kmu * vsmear)**2 / 2.)
+    elif form == 'lor':
+        def fun(kmu, vsmear):
+            return jnp.exp(-jnp.abs(kmu * vsmear))
+    else:
+        raise ValueError(f'unknown parametric redshift-smearing form {form!r}')
+    # 4 Mpc/h is ~380 km/s at z = 1.5, comfortably above the measured sigma_68 (161 km/s at
+    # most, for QSO around z = 1.65) that the PDF already accounts for.
+    # latex must end in '_X' or '_{...}' so Parameter.latex() merges the tracer namespace into
+    # the existing subscript; otherwise it appends a second one and mathtext rejects it.
+    fun.params = Parameter('vsmear', value=0., prior=dict(dist='uniform', limits=[0., 4.]),
+                           ref=dict(dist='norm', loc=0., scale=0.5), latex=r'v_{\mathrm{smear}}')
+    return fun
+
+
+def _get_redshift_smearing_damping(redshift_smearing, zeff, kmu_max=5., nkmu=100001):
+    r"""Tabulate the single-field characteristic function of the line-of-sight displacement.
+
+    A redshift error displaces a galaxy by :math:`\epsilon = \delta v / (aH)`, with :math:`aH`
+    from the **fiducial** cosmology --- the one used to turn redshifts into distances. Hence
+
+    .. math:: D(k\mu) = \int d\delta v\, \mathcal{P}(\delta v) e^{i k \mu \delta v / (aH)}
+
+    Parameters
+    ----------
+    redshift_smearing : lsstypes.ObservableLeaf
+        PDF of the redshift error, with ``dv`` [km/s] as coordinate and ``pdf`` as value
+        (see ``clustering_statistics/helper_scripts/convert_redshift_smearing.py``).
+    zeff : float
+        Effective redshift at which to evaluate :math:`aH`.
+
+    Returns
+    -------
+    damping : callable
+        ``damping(kmu)`` with ``kmu`` in :math:`h/\mathrm{Mpc}`; :math:`\mathcal{P}` is close
+        to symmetric, so only the (real) cosine transform is kept.
+    """
+    dv, pdf = redshift_smearing.coords('dv'), redshift_smearing.values('pdf')
+    # a H(zeff) in km/s per Mpc/h, fiducial cosmology
+    aH = 100. * get_fiducial().efunc(zeff) / (1. + zeff)
+    weights = np.zeros_like(dv)  # trapezoidal: the dv grid is not uniform
+    dgrid = np.diff(dv)
+    weights[:-1] += 0.5 * dgrid
+    weights[1:] += 0.5 * dgrid
+    weights = weights * pdf
+    # the direct sum is O(len(dv)) per point, prohibitive on the bispectrum angular grid
+    kmu = np.linspace(0., float(kmu_max), int(nkmu))
+    damping = np.empty_like(kmu)
+    step = max(1, int(2e7 // dv.size))
+    for start in range(0, kmu.size, step):
+        damping[start:start + step] = np.cos(kmu[start:start + step, None] / aH * dv) @ weights
+    damping /= damping[0]
+    return lambda x: np.interp(np.abs(x), kmu, damping)
+
+
+def _get_spectrum2_smearing_matrix(damping, k, ells, nmu=200):
+    r"""Multipole-mixing matrix ``M[ell, ellin, k]`` for the power spectrum.
+
+    :math:`D` depends on :math:`k\mu`, so damping :math:`P(k, \mu)` mixes multipoles:
+
+    .. math:: M_{\ell \ell^\prime}(k) = (2\ell + 1) \int_0^1 d\mu L_\ell(\mu) L_{\ell^\prime}(\mu) D^2(k\mu)
+
+    exact given the multipoles *ells* of the theory. Note :math:`D^2`: the two galaxies of a
+    pair are displaced independently.
+    """
+    x, w = np.polynomial.legendre.leggauss(2 * nmu)
+    mu, w = x[nmu:], (w[nmu:] + w[nmu - 1::-1]) / 2.  # fold onto [0, 1], the integrand is even
+    d2 = damping(np.asarray(k)[:, None] * mu)**2
+    legendre = {ell: sp.special.legendre(ell)(mu) for ell in ells}
+    return np.array([[(2 * ell + 1) * np.sum(w * legendre[ell] * legendre[ellin] * d2, axis=-1)
+                      for ellin in ells] for ell in ells])
+
+
+# Sugiyama tri-polar basis S_{l1 l2 L}, as functions of the rotational invariants
+# x = k1_hat . k2_hat, mu1 = k1_hat . n_hat and mu2 = k2_hat . n_hat, together with
+# H = (l1 l2 L; 0 0 0), the Wigner 3j at all m = 0 (folps' normalisation).
+# folps' angular integrand is (2 l1 + 1) (2 l2 + 1) (2 L + 1) / (8 pi) * S.
+_sugiyama_basis = {
+    (0, 0, 0): (1., lambda x, mu1, mu2: np.ones_like(x * mu1 * mu2)),
+    (1, 1, 0): (-1. / np.sqrt(3.), lambda x, mu1, mu2: -x / np.sqrt(3.)),
+    (2, 2, 0): (1. / np.sqrt(5.), lambda x, mu1, mu2: (3. * x**2 - 1.) / (2. * np.sqrt(5.))),
+    (2, 0, 2): (1. / np.sqrt(5.), lambda x, mu1, mu2: (3. * mu1**2 - 1.) / (2. * np.sqrt(5.))),
+    (0, 2, 2): (1. / np.sqrt(5.), lambda x, mu1, mu2: (3. * mu2**2 - 1.) / (2. * np.sqrt(5.))),
+    (1, 1, 2): (np.sqrt(2. / 15.), lambda x, mu1, mu2: (3. * mu1 * mu2 - x) / np.sqrt(30.)),
+    (2, 2, 2): (-2. / np.sqrt(70.), lambda x, mu1, mu2: (3. * (mu1**2 + mu2**2 + x**2) - 9. * mu1 * mu2 * x - 2.) / np.sqrt(70.)),
+}
+
+
+def _get_spectrum3_smearing_matrix(damping, k, ells, precision=(8, 10, 10)):
+    r"""Multipole-mixing matrix ``M[ell, ellin, k]`` for the bispectrum, in the Sugiyama basis.
+
+    .. math:: M_{ab}(k_1, k_2) = \frac{H_a}{H_b} \frac{N_a}{8\pi} \int d\Omega\, S_a\, D(k_1\mu_1) D(k_2\mu_2) D(k_3\mu_3)\, S_b
+
+    with :math:`N_a = (2l_1+1)(2l_2+1)(2L+1)` and :math:`d\Omega = dx\, d\mu_1\, d\phi` over
+    :math:`[-1, 1] \times [-1, 1] \times [0, 2\pi]`, matching folps' ``Sugiyama_Bell``. One
+    factor of :math:`D` per field: the three galaxies are displaced independently, unlike a
+    pair, which gives :math:`D^2`. The angular variables are taken pre-AP, as in folps'
+    ``bispectrum()``. Sanity check: :math:`M` is the identity for :math:`D \equiv 1`.
+
+    *precision* is folps' ``(Nphi, Nx, Nmu)``, the Gauss-Legendre orders of the three angular
+    integrals.
+    """
+    unknown = [ell for ell in ells if tuple(ell) not in _sugiyama_basis]
+    if unknown:
+        raise NotImplementedError(f'Sugiyama basis functions are not implemented for {unknown}')
+    nphi, nx, nmu = (int(n) for n in precision)
+    # Gauss-Legendre nodes: phi on [0, pi] (the phi integrand is even, hence the factor 2
+    # below), x and mu1 on [-1, 1]
+    phi, wphi = np.polynomial.legendre.leggauss(nphi)
+    phi, wphi = (phi + 1.) * np.pi / 2., wphi * np.pi / 2.
+    x12, wx = np.polynomial.legendre.leggauss(nx)
+    mu1, wmu = np.polynomial.legendre.leggauss(nmu)
+
+    k = np.asarray(k)
+    k1, k2 = k[:, 0, None, None, None], k[:, 1, None, None, None]
+    x12, mu1, phi = x12[None, :, None, None], mu1[None, None, :, None], phi[None, None, None, :]
+    # same geometry as folps' APtransforms, before the AP distortion
+    k3 = np.sqrt(k1**2 + k2**2 + 2. * k1 * k2 * x12)
+    mu2 = np.sqrt(1. - mu1**2) * np.sqrt(1. - x12**2) * np.cos(phi) + mu1 * x12
+    mu3 = -(k1 * mu1 + k2 * mu2) / k3
+    weights = 2. * wphi[None, None, None, :] * wmu[None, None, :, None] * wx[None, :, None, None]
+    d = damping(k1 * mu1) * damping(k2 * mu2) * damping(k3 * mu3) * weights
+
+    x12, mu1, mu2 = np.broadcast_arrays(x12, mu1, mu2)
+    basis = [_sugiyama_basis[tuple(ell)][1](x12, mu1, mu2) for ell in ells]
+    hnorm = np.array([_sugiyama_basis[tuple(ell)][0] for ell in ells])
+    nnorm = np.array([np.prod([2 * l + 1 for l in ell]) for ell in ells], dtype='f8')
+    toret = np.empty((len(ells), len(ells), len(k)), dtype='f8')
+    for ill, base in enumerate(basis):
+        for illin, basein in enumerate(basis):
+            toret[ill, illin] = (hnorm[ill] / hnorm[illin] * nnorm[ill] / (8. * np.pi)
+                                 * np.sum(base * d * basein, axis=(1, 2, 3)))
+    return toret
+
+
+def window_with_redshift_smearing(window, redshift_smearing, **kwargs):
+    r"""Return *window* with the redshift-smearing damping folded in.
+
+    The damping depends on :math:`k\mu`, so it cannot be applied multipole by multipole --- it
+    mixes them. Written as :math:`P^\mathrm{obs}_\ell = \sum_{\ell^\prime} M_{\ell \ell^\prime}
+    P_{\ell^\prime}`, with :math:`M` block-diagonal in :math:`k`, it composes with the window
+    as :math:`W^\prime = W M`. Folding it in here costs nothing at evaluation time and leaves
+    the theory untouched.
+
+    Both the power spectrum (``ells`` are ints) and the bispectrum in the Sugiyama basis
+    (``ells`` are ``(l1, l2, L)`` triplets) are supported; the two differ in the number of
+    :math:`D` factors, one per field.
+
+    Parameters
+    ----------
+    window : lsstypes.WindowMatrix
+    redshift_smearing : lsstypes.ObservableLeaf
+        PDF of the redshift error, see :func:`_get_redshift_smearing_damping`.
+    **kwargs : dict
+        Passed on to the matrix builder: ``nmu`` for the power spectrum, ``precision`` for the
+        bispectrum.
+
+    Returns
+    -------
+    window : lsstypes.WindowMatrix
+    """
+    zeff = window.attrs.get('zeff', None)
+    if zeff is None:
+        zeff = next(iter(window.observable)).attrs['zeff']
+    damping = _get_redshift_smearing_damping(redshift_smearing, zeff)
+
+    with_templates = hasattr(window.theory, 'types')
+    window_theory = window.at.theory.get(types='theory') if with_templates else window
+
+    ells = list(window_theory.theory.ells)
+    coords = [leaf.coords('k') for leaf in window_theory.theory]
+    if not all(np.array_equal(coord, coords[0]) for coord in coords):
+        raise NotImplementedError('redshift smearing requires all theory multipoles on the same k grid')
+    k = coords[0]
+    if np.ndim(ells[0]) == 0:  # power spectrum: ells are 0, 2, 4...
+        matrix = _get_spectrum2_smearing_matrix(damping, k, ells, **kwargs)
+    else:  # bispectrum, Sugiyama basis: ells are (l1, l2, L)
+        matrix = _get_spectrum3_smearing_matrix(damping, k, ells, **kwargs)
+    logger.info('Folding redshift smearing at zeff=%.4f into the window: ells=%s, %d theory coordinates.',
+                zeff, ells, len(k))
+
+    value = window_theory.value()
+    value = value.reshape(value.shape[0], len(ells), len(k))
+    value = np.einsum('dak,abk->dbk', value, matrix).reshape(value.shape[0], len(ells) * len(k))
+    window_theory = window_theory.clone(value=value)
+
+    if with_templates:  # re-assemble the window matrix, as in rebin_spectrum3_window
+        window_templates = window.at.theory.get(types=[t for t in window.theory.types if t != 'theory'])
+        window = window.clone(value=np.concatenate([window_theory.value(), window_templates.value()], axis=-1),
+                              theory=window.theory.at(types='theory').replace(window_theory.theory))
+    else:
+        window = window_theory
+    return window
+
+
 def select_window_theory(window, data):
     """Restrict window theory to a range close to observed data."""
     coord_name = list(next(iter(data)).coords())
@@ -1218,7 +1534,9 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
             elif 'zsnap' in pole.attrs:
                 data_attrs['z'] = pole.attrs['zsnap']
         data_attrs.setdefault('z', observable_options['catalog'].get('zsnap', None))
-        namespace = _str_from_observable_options(observable_options, level={'catalog': 1, 'stat': 0, 'window': 0, 'theory': 0, 'covariance': 0})
+        # redshift_smearing: 0 --- this is the tracer namespace (it becomes data_attrs['tracers']
+        # and the parameter namespace), so it must not carry the systematic model.
+        namespace = _str_from_observable_options(observable_options, level={'catalog': 1, 'stat': 0, 'window': 0, 'theory': 0, 'covariance': 0, 'redshift_smearing': 0})
         data_attrs['tracers'] = namespace.split('x')
         if namespace not in nbar and 'spectrum2' in stats.observable.observables:
             nbar[namespace] = 1. / stats.observable.get(observables='spectrum2', tracers=label['tracers'], ells=0).values('shotnoise').mean()
@@ -1249,7 +1567,8 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
                         data_attrs['z'] = pole.attrs['zsnap']
             if mpicomm.rank == 0 and data_attrs.get('z', None) is not None:
                 logger.info(f'{label}: data effective redshift = {data_attrs["z"]:.3f}')
-            theory = get_theory(stat, theory_options=observable_options['theory'], cosmology=cosmology, data_attrs=data_attrs, data=data)
+            theory = get_theory(stat, theory_options=observable_options['theory'], cosmology=cosmology, data_attrs=data_attrs, data=data,
+                                redshift_smearing=observable_options.get('redshift_smearing', None))
             if window is not None and cls == Spectrum3PolesObservable:
                 # Compactify window theory
                 theory_dk = observable_options.get('window', {}).get('theory_dk', None)
@@ -1282,7 +1601,10 @@ def get_single_likelihood(likelihood_options, stats: types.GaussianLikelihood=No
             _str_cosmology += '_' + observable_options['emulator']['name']
             _str_theory = _str_from_observable_options(
                 observable_options,
-                level={'stat': 2, 'theory': 100, 'window': 1, 'catalog': 2},
+                # redshift_smearing: 0 --- the emulator wraps theory.pt, upstream of both the
+                # window and vsmear, so it does not depend on the smearing; tagging it here
+                # would only force a pointless refit.
+                level={'stat': 2, 'theory': 100, 'window': 1, 'catalog': 2, 'redshift_smearing': 0},
             )
             cache_fn = cache_dir / f'emulator_{_str_cosmology}' / f'emulator_{_str_theory}_{_hash}.h5'
             from desilike.base import compile
@@ -1482,16 +1804,22 @@ def fill_fiducial_observable_options(options):
     tracer = options['catalog'].get('tracer', None)
     zrange = options['catalog'].get('zrange', None)
     fiducial_options = propose_fiducial_observable_options(stat, tracer, zrange)
+    # ``mesh2_spectrum`` defaults are defined for folpsD: do not propose the folpsD-only
+    # damping settings for another model. Dropped from the *defaults*, before the merge below
+    # brings them in -- an explicitly requested damping is the caller's business and stands.
+    model = options.get('theory', {}).get('model', fiducial_options['theory'].get('model'))
+    if model != 'folpsD':
+        fiducial_options['theory'].pop('damping', None)
+        fiducial_options['theory'].pop('damping_method', None)
     options = fiducial_options | options
     for key, value in fiducial_options.items():
         options[key] = value | options[key]
-    # ``mesh2_spectrum`` defaults are defined for folpsD.  Once a caller
-    # selects another model, do not leak the folpsD-only damping settings back
-    # in on this or a subsequent fiducial-fill pass.
-    theory_options = options.get('theory', {})
-    if theory_options.get('model') != 'folpsD':
-        theory_options.pop('damping', None)
-        theory_options.pop('damping_method', None)
+    # Normalise 'pdf+lor' -> {'mode': 'pdf+lor', <get_stats_fn keys>} once, here, so the rest of
+    # the pipeline only reads it. Idempotent, and validating at options-construction time means
+    # a bad mode raises before any file is touched.
+    redshift_smearing = _format_redshift_smearing(options.get('redshift_smearing', None))
+    if redshift_smearing is not None:
+        options['redshift_smearing'] = redshift_smearing
     return options
 
 
@@ -1628,7 +1956,7 @@ def get_full_tracer_zrange(tracerz=None, zrange=None):
 
 def _get_level(level: int | dict=None):
     """Compact helper to normalise verbosity level for string helpers."""
-    _default_level = {'stat': 1, 'catalog': 1, 'window': 1, 'theory': 0, 'covariance': 0, 'cosmology': 1}
+    _default_level = {'stat': 1, 'catalog': 1, 'window': 1, 'redshift_smearing': 1, 'theory': 0, 'covariance': 0, 'cosmology': 1}
     if level is None: level = {}
     if not isinstance(level, dict):
         level = {name: level for name in _default_level}
@@ -1812,6 +2140,11 @@ def _str_from_observable_options(options: dict, level: int=None) -> str:
         if templates:
             out_str.append('w')
             out_str.extend(templates)
+
+    if level['redshift_smearing'] > 0:
+        redshift_smearing = _format_redshift_smearing(options.get('redshift_smearing', None))
+        if redshift_smearing is not None:  # only when set, so the default stays byte-identical
+            out_str.append('rs-' + redshift_smearing['mode'].replace('+', '-'))
 
     if level['theory'] > 0:
         out_str.append('th')

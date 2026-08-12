@@ -111,7 +111,7 @@ def _apply_mesh3_spectrum_close_pair_correction(spectrum, correction):
     return spectrum.clone(value=spectrum.value() + value)
 
 
-def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
+def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None, aic=None,
                             basis='sugiyama-diagonal', ells=[(0, 0, 0), (2, 0, 2)], edges=None, los='local',
                             buffer_size=0, norm: dict=None, cache=None):
     r"""
@@ -155,7 +155,7 @@ def compute_mesh3_spectrum(*get_data_randoms, mattrs=None, cut=None, auw=None,
     # Set up distributed computation mesh across JAX devices
     with create_sharding_mesh(meshsize=mattrs.get('meshsize', None)) as sharding_mesh:
         # Load and prepare particle catalogs (data and randoms) with IDS for reproducibility (random splitting based on object IDs)
-        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, add_randoms=['IDS'])
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=mattrs, aic=aic, add_randoms=['IDS'])
         # Attributes about the estimation
         attrs = _get_jaxpower_attrs(*all_particles)
         # Set line-of-sight direction in attributes
@@ -271,7 +271,8 @@ def _get_window_edges(mattrs, scales: tuple=(1, 4)):
 
 
 def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, ibatch: tuple=None,
-                                  computed_batches: list=None, buffer_size: int=0, method: str='smooth_mesh', split_randoms: int=None):
+                                  computed_batches: list=None, buffer_size: int=0, method: str='smooth_mesh', split_randoms: int=None,
+                                  edgesin: np.ndarray=None, ellmax: int=16, ellwmax: int=0):
     r"""
     Compute the 3-point spectrum window with :mod:`jaxpower`.
 
@@ -281,7 +282,11 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
         Functions that return tuples of (data, randoms) catalogs.
         See :func:`prepare_jaxpower_particles` for details.
     spectrum : Mesh3SpectrumPoles
-        Measured 3-point spectrum multipoles.
+        Measured 3-point spectrum multipoles, in the sugiyama or scoccimarro basis
+        (read from ``pole.basis``). For the scoccimarro basis, the theory side of the
+        returned window matrix lives on the UNORDERED :math:`(k_1', k_2', k_3')` grid:
+        evaluate the theory directly at ``window.theory.get(...).coords('k')``, or scatter
+        an ordered theory vector with :func:`jaxpower.get_scoccimarro_symmetrization_matrix`.
     zeff : dict, optional
         Optional arguments for computing effective redshift.
         Default is ``{'cellsize': 10.}`` (density computed with ``cellsize = 10.``)
@@ -294,6 +299,27 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
         ``'smooth_particle'`` for particle counts.
     computed_batches : list, optional
         The window function multipoles that have been computed thus far.
+    edgesin : np.ndarray, optional
+        1D theory-side k-bin edges. If ``None``, the default depends on the basis, because the
+        theory bins form a 3D grid for the scoccimarro basis but only a 2D one for sugiyama, so the
+        same refinement costs ~15x there against ~4x here:
+
+        - scoccimarro: ``arange(0., 1.2 * kmax, step)``, i.e. the measured binning extended 20% past
+          :math:`k_{\mathrm{max}}` to catch the leakage the window scatters in from just outside the
+          measured range;
+        - sugiyama: ``arange(0., 1.5 * kmax, step / 2)``.
+    ellmax : int, default=16
+        For the scoccimarro basis: truncation of the TripoSH multipole sums in the WINDOW MATRIX,
+        passed to :func:`jaxpower.compute_smooth3_spectrum_window`. Ignored for the sugiyama basis.
+        It is a convergence parameter (the surviving term count is exactly ``4 * ellmax - 1``): do
+        not lower it to save time without checking the impact. Measured on abacus LRG z0.4-0.6 NGC,
+        dropping it to 2 takes the mesh window from a median :math:`|\Delta B_0|/\sigma` of 1.8 to
+        12.0 -- so this is not a knob to economize on.
+    ellwmax : int, default=0
+        Truncation of the window multipoles :math:`Q_{\ell_1 \ell_2 L}` themselves -- which ones get
+        enumerated and measured. A DIFFERENT axis from ``ellmax``: this one sets how much of the
+        window's own anisotropy is captured, ``ellmax`` how far the convolution sums are carried.
+        Defaults to ``ellmax``. Terms needing a :math:`Q_{\ell_1\ell_2L}` that was not measured are skipped.
 
     Returns
     -------
@@ -312,9 +338,18 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
     norm = jnp.concatenate([spectrum.get(ell).values('norm') for ell in spectrum.ells])
 
     # Build 1D k-bin edges
-    k, index = np.unique(pole.coords('k', center='mid_if_edges')[..., 0], return_index=True)
-    edges = edges[index, 0]
-    edges = np.insert(edges[:, 1], 0, edges[0, 0])
+    sedges = np.asarray(edges)
+    if 'scoccimarro' in basis and 'diagonal' not in basis:
+        # Ordered triangles: no single axis spans the 1D edges, so collect them from all three;
+        # the default ordered-triangle mask (mask_edges=None) then reproduces the measured binning
+        flat = sedges.reshape(-1, 2)
+        edges = np.append(np.unique(flat[:, 0]), flat[:, 1].max())
+        mask_edges = None
+    else:
+        k, index = np.unique(pole.coords('k', center='mid_if_edges')[..., 0], return_index=True)
+        edges = sedges[index, 0]
+        edges = np.insert(edges[:, 1], 0, edges[0, 0])
+        mask_edges = ''
 
     # Set up distributed computation mesh
     with create_sharding_mesh(meshsize=mattrs.get('meshsize', None)) as sharding_mesh:
@@ -333,8 +368,11 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
         seed = [(42, randoms.extra['IDS']) for randoms in all_randoms]
         zeff, norm_zeff = compute_fkp_effective_redshift(*all_randoms, order=3, split=seed, fields=fields, return_fraction=True, **kw_zeff)
 
-        kw, ellsin = get_smooth3_window_bin_attrs(ells, ellsin=2, fields=fields, return_ellsin=True)
-        ellsw = kw['ells']
+        # ellsin (theory multipoles) follows ellmax, the matrix truncation; ellsw (which Q
+        # multipoles are measured) follows ellwmax. Taking ellsin from ellwmax would drop theory
+        # blocks: at ellwmax = 0 the enumeration returns ellsin = [0] alone.
+        _, ellsin = get_smooth3_window_bin_attrs(ells, ellsin=2, fields=fields, return_ellsin=True, basis=basis, ellmax=ellmax)
+        ellsw = get_smooth3_window_bin_attrs(ells, ellsin=2, fields=fields, basis=basis, ellmax=ellwmax)['ells']
         if 'mesh' in method:
             # Filter to low multipoles only (reduce computational cost)
             ellsw = [ell for ell in ellsw if all(ell <= 2 for ell in ell)]
@@ -351,7 +389,8 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
                 start, stop = ibatch[0] * len(ellsw) // ibatch[1], (ibatch[0] + 1) * len(ellsw) // ibatch[1]
                 ellsw = ellsw[start:stop]
             correlation = compute_smooth3_spectrum_window_correlation(*all_randoms, spectrum=spectrum, zeff=kw_zeff,
-                                                                      buffer_size=buffer_size, method=method, ells=ellsw, split_randoms=split_randoms, fields=fields)
+                                                                      buffer_size=buffer_size, method=method, ells=ellsw, split_randoms=split_randoms, fields=fields,
+                                                                      ellmax=ellwmax)
 
         #def zero(pole, label):
         #    if label['ells'] in [(1, 1, 0), (1, 1, 2), (1, 3, 2)]:
@@ -361,12 +400,27 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
         #correlation = correlation.map(zero, input_label=True)
 
         # Create spectrum binning
-        bin = BinMesh3SpectrumPoles(mattrs, edges=edges, ells=ells, basis=basis, mask_edges='')
-        # Create finer input correlation binning
+        bin = BinMesh3SpectrumPoles(mattrs, edges=edges, ells=ells, basis=basis, mask_edges=mask_edges)
+        if bin.edges.shape != sedges.shape or not np.allclose(bin.edges, sedges):
+            raise ValueError(f'could not reproduce the measured binning of shape {sedges.shape} from its edges '
+                             f'(got {bin.edges.shape}); was the spectrum measured with a custom mask_edges?')
+        # Theory-side binning.
+        # scoccimarro: the measured step, out to 1.2 * kmax. Its theory bins form a 3D grid, so the
+        # column count and cost go as the CUBE of the number of 1D edges -- halving the step and
+        # reaching to 1.5 * kmax instead costs ~15x in both (2.3 GB / 14 min versus 0.15 GB / 1 min
+        # on the fiducial geometry).
+        # sugiyama: unchanged (half-step, 1.5 * kmax). Only two legs are binned there, so the same
+        # refinement costs ~4x rather than ~15x, and is affordable.
         stop = bin.edges1d[0].max()
         step = np.diff(bin.edges1d[0], axis=-1).min()
-        edgesin = np.arange(0., 1.5 * stop, step / 2.)
-        edgesin = jnp.column_stack([edgesin[:-1], edgesin[1:]])
+        if edgesin is None:
+            if 'scoccimarro' in basis:
+                edgesin = np.arange(0., 1.2 * stop, step)
+            else:
+                edgesin = np.arange(0., 1.5 * stop, step / 2.)
+        edgesin = np.asarray(edgesin)
+        if edgesin.ndim == 1:
+            edgesin = jnp.column_stack([edgesin[:-1], edgesin[1:]])
 
     results = {}
     results[f'window_{method}3_correlation_raw'] = correlation
@@ -380,7 +434,7 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
 
     # Convert correlation window into spectrum window
     window = compute_smooth3_spectrum_window(correlation, edgesin=edgesin, ellsin=ellsin, bin=bin,
-                                             flags=('fftlog',), batch_size=4)
+                                             flags=('fftlog',), batch_size=4, ellmax=ellmax)
 
     # Update observable metadata
     observable = window.observable
@@ -394,7 +448,7 @@ def compute_window_mesh3_spectrum(*get_data_randoms, spectrum, zeff: dict=None, 
     return results
 
 
-def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None, zeff: dict=None, ells: int | list=None, buffer_size: int=0, method: str='smooth_mesh', split_randoms: int=None, fields: list=None):
+def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None, zeff: dict=None, ells: int | list=None, buffer_size: int=0, method: str='smooth_mesh', split_randoms: int=None, fields: list=None, ellmax: int=16):
     r"""
     Compute the 3-point window correlation with :mod:`jaxpower` or :mod:`cucount`.
 
@@ -417,6 +471,10 @@ def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None
         If provided, number of subsets to split the random catalogs into.
         If a tuple, (number of splits, used number of splits).
         (e.g. (10, 5) will just use the first 5 splits out of 10).
+    ellmax : int, default=16
+        For a spectrum in the scoccimarro basis: truncation of the TripoSH multipole sums,
+        setting the default window multipoles when ``ells`` is ``None``;
+        see :func:`jaxpower.get_smooth3_window_bin_attrs`. Ignored for the sugiyama basis.
 
     Returns
     -------
@@ -467,7 +525,7 @@ def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None
 
         correlations = []
         # Get window basis attributes (e.g., which multipoles to compute)
-        kw = get_smooth3_window_bin_attrs(spectrum.ells, ellsin=2, fields=fields)
+        kw = get_smooth3_window_bin_attrs(spectrum.ells, ellsin=2, fields=fields, basis=basis, ellmax=ellmax)
         if ells is not None:
             kw['ells'] = ells
         ells = kw['ells']
@@ -499,7 +557,6 @@ def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None
 
             ells_slepian = convert_ells(ells, 'sugiyama', 'slepian')
             ells12, ells13 = [tuple(np.unique([ell[idim] for ell in ells_slepian])) for idim in range(2)]
-
             sepmax = jnp.sqrt(jnp.sum(mattrs.boxsize**2))
             limits = [mattrs.cellsize.min(), 200., 500.]  # drop bin at 0., which is noisy
             limits = [lim for lim in limits if lim < sepmax] + [sepmax]
@@ -641,6 +698,10 @@ def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None
                 return value
 
             correlation = interpolate_window_function(counts, coords=coords, order=3, pad_value=pad_value)
+            #if jax.process_index() == 0:
+            #    counts.write('counts.h5')
+            #    correlation.write('interpolated_counts.h5')
+            #exit()
 
         elif method == 'smooth_mesh':
             # JIT-compile 3-point correlation computation
@@ -717,7 +778,9 @@ def compute_smooth3_spectrum_window_correlation(*get_data_randoms, spectrum=None
 
 
 def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, window3=None, mattrs=None,
-                                       free=None, select2={'k': slice(0, None, 10)}, select3={'k': slice(0, None, 2)}):
+                                       free=None, select2=[{'k': slice(0, None, 10)}, {'k': (0.02, 1.)}],
+                                       select3=[{'k': slice(0, None, 2)}, {'k': (0.02, 1.)}],
+                                       damping='lor', size3=10, covariance=None, nstart=1):
     r"""
     Fit bias parameters on the joint (P, B) data vector to build the theory assumed in the covariance.
 
@@ -751,10 +814,29 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
         realistic effective volume (this only reweights the preliminary fit).
     free : tuple, optional
         Names of the bias parameters to fit. If ``None`` (default), all bias parameters are free:
-        ``('b1', 'b2', 'bs', 'b3nl', 'c1', 'c2', 'X_FoG', 'snb0', 'sn0')``.
-    select2, select3 : dict, optional
+        ``('b1', 'b2', 'bs', 'b3nl', 'c1', 'X_FoG', 'snb0', 'sn0',
+        'alpha0', 'alpha2', 'alpha4')`` --- that is, all of them except ``c2``, which is held
+        at 0 (see ``fixed`` below; pass ``free`` explicitly to fit it too).
+        Following FOLPS, ``P`` and ``B`` carry independent counterterms:
+        ``alpha0 / alpha2 / alpha4`` on ``P``, and ``c1 / c2`` on the linear kernel,
+        entering ``B`` and ``T`` only.
+    select2, select3 : dict, list, optional
         If provided, selections applied to ``spectrum2`` / ``spectrum3`` prior to fitting
         (e.g. ``{'k': (0.02, 0.15)}`` to restrict to scales where the tree-level theory holds).
+        A list of dicts is applied in order, e.g. ``[{'k': slice(0, None, 10)}, {'k': (0.02, 1.)}]``
+        thins the binning first, then cuts the range. The default ``k > 0.02`` cut drops the few
+        largest-scale bins, where the survey window dominates: above it the window is close to
+        (a constant times) the identity, so the unwindowed model fitted here -- ``window3`` is
+        typically not available -- is a fair approximation.
+    damping : str, default='lor'
+        Finger-of-God damping kernel, passed to the P / B / T models: one of ``None``, ``'lor'``,
+        ``'exp'`` or ``'vdg'``; see :func:`jaxpower.pt.fog_damping`.
+    size3 : int, default=10
+        Number of Gauss-Legendre nodes per angular variable in :class:`jaxpower.pt.ProjectToSell`,
+        used to project the B model onto Sugiyama multipoles. Benchmarked against FOLPS (itself
+        converged), the max error over k <= 0.195 is 2.1% (B000) / 1.1% (B202) at ``size3=6``,
+        1.7% / 1.7% at ``size3=10``, 0.28% / 0.28% at ``size3=14`` and 0.10% / 0.10% at
+        ``size3=20``. Cost scales as ``size3**3`` but is negligible next to the covariance.
 
     Returns
     -------
@@ -773,17 +855,25 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
                              ProjectToPoles, ProjectToSell)
     from jaxpower.utils import get_legendre
 
-    # window3 gates windowing altogether: with no window3, ignore window2 too and fall back to
-    # comparing the raw (unwindowed) model to the data at their own measured binning.
-    with_window = window3 is not None
+    # P and B are windowed independently: window2 convolves the P model, window3 the B model.
+    # window3 is frequently unavailable, in which case B is still compared unwindowed at its own
+    # measured binning while P is convolved -- rather than dropping the P window too.
+    with_window2 = window2 is not None
+    with_window3 = window3 is not None
 
-    # Restrict data to the fitting range if requested
-    if select2 is not None: spectrum2 = spectrum2.select(**select2)
-    if select3 is not None: spectrum3 = spectrum3.select(**select3)
+    # Restrict data to the fitting range if requested; a list of selections is applied in order
+    def _select(observable, select):
+        if select is None: return observable
+        if isinstance(select, dict): select = [select]
+        for sel in select: observable = observable.select(**sel)
+        return observable
 
-    if with_window:
-        # Match window observable axes to the (possibly restricted) data before fitting
+    spectrum2, spectrum3 = _select(spectrum2, select2), _select(spectrum3, select3)
+
+    # Match window observable axes to the (possibly restricted) data before fitting
+    if with_window2:
         window2 = window2.at.observable.match(spectrum2)
+    if with_window3:
         from full_shape.tools import rebin_spectrum3_window
         window3 = rebin_spectrum3_window(window3, data=spectrum3)
         window3 = window3.at.observable.match(spectrum3)
@@ -807,24 +897,52 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
     # Shot noise (1 + alpha) / nbar, read off the FKP monopole shot noise level.
     shotnoise = float(np.mean(spectrum2.get(0).values('shotnoise')))
     kt = np.logspace(-4, 1, 512)
-    pkt = cosmo.get_fourier().pk_interpolator().to_1d(z=z)(kt)
+    pk_interp = cosmo.get_fourier().pk_interpolator().to_1d(z=z)
+    pkt = pk_interp(kt)
+    # BAO-filtered no-wiggle spectrum. With pknow == pk the IR resummation collapses to the
+    # identity -- wiggles = pk - pknow = 0 and pknow_eft == pk_eft -- so the BAO feature is
+    # left completely undamped.
+    from cosmoprimo import PowerSpectrumBAOFilter
+    pknowt = PowerSpectrumBAOFilter(pk_interp, engine='wallish2018').smooth_pk_interpolator()(kt)
 
     def pk_callable(q):
         return jnp.interp(q, kt, pkt)
 
-    pknow_callable = pk_callable  # no-wiggle spectrum; plug a BAO-filtered one if desired
+    def pknow_callable(q):
+        return jnp.interp(q, kt, pknowt)
 
     # Tabulate the 1-loop P(k) integrals once
     k_table = jnp.logspace(-3, np.log10(mattrs.knyq.max()), 80)
     table, table_now = prepare_spectrum2_redshift_tracer(k_table, pk_callable, pknow_callable)
 
     fid_bias = {'b1': 2.0, 'b2': 0.5, 'bs': -0.3, 'b3nl': 0.1,
-                'c1': 0.1, 'c2': 0.2, 'X_FoG': 2., 'snb0': 0.1, 'sn0': 0.1}
+                'c1': 0.1, 'c2': 0., 'X_FoG': 2., 'snb0': 0.1, 'sn0': 0.1,
+                'alpha0': 0., 'alpha2': 0., 'alpha4': 0.}
+
+    # c1 (mu^2) and c2 (mu^4) differ by a single power of mu^2, so on the 18 diagonal B bins
+    # fitted here (k <= 0.195) they are near-degenerate: unbounded and unprioritised, they run
+    # away along their flat direction to O(300) while their sum stays O(50). Hold c2 at 0 and
+    # let c1 carry the bispectrum counterterm.
+    fixed = ('c2',)
+
+    # As in FOLPS, P and B carry their own, independent counterterms:
+    # - P: alpha0 / alpha2 / alpha4, added to the spectrum as
+    #   (alpha0 + alpha2 mu^2 + alpha4 mu^4) k^2 P_lin. jaxpower takes these as *ct_params*
+    #   keyword arguments, not through bias_params -- which is why they stay at their 0.
+    #   default unless passed here.
+    # - B (and T): c1 / c2, on the linear kernel, reached through bias_params.
+    ct_names = ['alpha0', 'alpha2', 'alpha4']
+
+    def split_ct(bias):
+        bias = dict(bias)
+        ct = {name: bias.pop(name) for name in ct_names if name in bias}
+        return bias, ct | {'damping': damping}
 
     def make_theory(bias):
         # 3D P / B / T callables consumed by compute_spectrum3_covariance;
         # the key of bias_params must match the observable / window field label (0)
-        bias_params = {0: dict(bias)}
+        bias, ct = split_ct(bias)
+        bias_params = {0: bias}
 
         # P(kvec): precompute the P_ell(k) multipoles once, on table['matter']['k']
         # (the same k grid spectrum2_redshift_tracer's own kvec branch already
@@ -835,7 +953,7 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
         # linear interpolation in k), just no longer redundantly recomputed.
         ells_P = list(range(0, 8, 2))
         to_poles_P = ProjectToPoles(mu=10, ells=ells_P)
-        poles_P = to_poles_P(spectrum2_redshift_tracer(to_poles_P.mu, table, table_now, f, bias_params))
+        poles_P = to_poles_P(spectrum2_redshift_tracer(to_poles_P.mu, table, table_now, f, bias_params, **ct))
         k_table_P = table['matter']['k']
 
         def P(kvec):
@@ -847,10 +965,10 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
                       for ill, ell in enumerate(ells_P))
 
         def B(k1vec, k2vec, k3vec):
-            return spectrum3_redshift_tracer(k1vec, k2vec, pk_callable, pknow_callable, f=f, bias_params=bias_params)
+            return spectrum3_redshift_tracer(k1vec, k2vec, pk_callable, pknow_callable, f=f, bias_params=bias_params, damping=damping)
 
         def T(k1vec, k2vec, k3vec, k4vec):
-            return spectrum4_redshift_tracer(k1vec, k2vec, k3vec, pk_callable, pknow_callable, f=f, bias_params=bias_params)
+            return spectrum4_redshift_tracer(k1vec, k2vec, k3vec, pk_callable, pknow_callable, f=f, bias_params=bias_params, damping=damping)
 
         def theory(fields):
             return {2: P, 3: B, 4: T}.get(len(fields), None)
@@ -868,68 +986,69 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
     def theory_cov(fields):
         return make_theory(fid_bias)(fields) if len(fields) == 2 else None
 
-    if jax.process_index() == 0:
-        logger.info('Computing preliminary P + B covariance')
-    covariance = compute_spectrum3_covariance(mattrs, mattrs, observable, theory=theory_cov,
-                                              shotnoise=shotnoise, cache={})
+    # Weighting covariance for the chi2. The default periodic-box, P-only one is convenient but
+    # it is NOT the covariance of these data: it uses the embedding box volume (so its sigmas are
+    # too small by sqrt(V_box / V_eff) -- a global factor, which does not move the minimum but
+    # does make chi2 uninterpretable), and, more importantly, it gets the RELATIVE weights wrong.
+    # It has no window mode-coupling, and with B = T = None the bispectrum bins carry only their
+    # Gaussian errors -- measured against 366 GLAM-Uchuu mocks, the non-Gaussian terms are 39-46%
+    # of the B000 variance above k ~ 0.05, so those bins are over-weighted here and the fit is
+    # pulled towards them. Pass `covariance` (a CovarianceMatrix on the same observable, e.g. the
+    # previous iteration's windowed analytic one, or a mock covariance where available) to weight
+    # the fit properly; the box one remains the fallback.
+    if covariance is None:
+        if jax.process_index() == 0:
+            logger.info('Computing preliminary P + B covariance (periodic box, P-only)')
+        covariance = compute_spectrum3_covariance(mattrs, mattrs, observable, theory=theory_cov,
+                                                  shotnoise=shotnoise, cache={})
+    else:
+        covariance = covariance.at.observable.match(observable)
+        if jax.process_index() == 0:
+            logger.info('Using the supplied covariance to weight the preliminary fit')
     Cinv = jnp.asarray(np.linalg.inv(np.asarray(covariance.value())))
 
-    names = list(free) if free is not None else list(fid_bias.keys())
+    names = list(free) if free is not None else [name for name in fid_bias if name not in fixed]
 
-    if with_window:
-        # Precompute, once, the projectors and kvec grids (independent of the bias parameters).
-        # The k (P) / (k1, k2) (B) grid is assumed shared across all window theory ells, so P/B
-        # need only be evaluated once (not once per ell) and projected to all ells at once --
-        # mirroring the unwindowed branch below, which does the same for spectrum2/spectrum3's
-        # own (shared) k grid.
+    # Precompute, once, the projectors and kvec grids (independent of the bias parameters).
+    # The k grid is assumed shared across all theory ells, so P / B need only be evaluated once
+    # (not once per ell) and projected to all ells at once. Where a window is provided the model
+    # is built on the window's theory grid and convolved; otherwise directly at the data binning.
+    if with_window2:
         ells2 = list(window2.theory.ells)
         k2d = np.asarray(window2.theory.get(ells=ells2[0]).coords('k'))  # (nk,)
-        proj2 = ProjectToPoles(ells=ells2, mu=10)
-        mu = np.asarray(proj2.mu)
-        kvec2 = jnp.asarray(k2d[:, None, None] * np.stack([np.sqrt(1. - mu**2), np.zeros_like(mu), mu], axis=-1))
+        window2_value = jnp.asarray(window2.value())
+    else:
+        ells2 = list(spectrum2.ells)
+        k2d = np.asarray(next(iter(spectrum2)).coords('k'))  # (nk,)
+        window2_value = None
+    proj2 = ProjectToPoles(ells=ells2, mu=10)
+    mu = np.asarray(proj2.mu)
+    kvec2 = jnp.asarray(k2d[:, None, None] * np.stack([np.sqrt(1. - mu**2), np.zeros_like(mu), mu], axis=-1))
 
+    if with_window3:
         ells3 = list(window3.theory.ells)
         k3d = np.asarray(window3.theory.get(ells=ells3[0]).coords('k'))  # (nbins, 2) paired (k1, k2)
-        proj3 = ProjectToSell(ells=ells3, size=6)
-        k1vec3 = jnp.asarray(k3d[:, 0, None, None] * np.asarray(proj3.k1hat)[None, ...])
-        k2vec3 = jnp.asarray(k3d[:, 1, None, None] * np.asarray(proj3.k2hat)[None, ...])
-
-        # Precompute the (concrete) window matrices once; window2.theory.ells / window3.theory.ells
-        # (each ell's own k values raveled, in this order) fix the flattening order that both
-        # these and model_vector's own concatenation must follow.
-        window2_value = jnp.asarray(window2.value())
         window3_value = jnp.asarray(window3.value())
-
-        def model_vector(x):
-            bias_params = {0: fid_bias | dict(zip(names, x))}
-            P3d = spectrum2_redshift_tracer(kvec2, table, table_now, f, bias_params)  # (nk, nmu)
-            p_flat = proj2(P3d).ravel()  # (nells2, nk) -> flat, ell-major
-            B3d = spectrum3_redshift_tracer(k1vec3, k2vec3, pk_callable, pknow_callable, f=f, bias_params=bias_params)
-            b_flat = proj3(B3d).ravel()  # (nells3, nbins) -> flat, ell-major
-            p_poles = window2_value.dot(p_flat)
-            b_poles = window3_value.dot(b_flat)
-            return jnp.concatenate([p_poles, b_poles])
-
     else:
-        # Binned model multipoles, evaluated directly at the measured k coordinates (no window)
-        to_poles = ProjectToPoles(ells=spectrum2.ells, mu=10)
-        k2d = np.asarray(next(iter(spectrum2)).coords('k'))  # (nk,)
-        mu = np.asarray(to_poles.mu)
-        kvec_P = k2d[:, None, None] * np.stack([np.sqrt(1. - mu**2), np.zeros_like(mu), mu], axis=-1)  # (nk, nmu, 3)
+        ells3 = list(spectrum3.ells)
+        k3d = np.asarray(next(iter(spectrum3)).coords('k'))
+        window3_value = None
+    proj3 = ProjectToSell(ells=ells3, size=size3)
+    k1vec3 = jnp.asarray(k3d[:, 0, None, None] * np.asarray(proj3.k1hat)[None, ...])
+    k2vec3 = jnp.asarray(k3d[:, 1, None, None] * np.asarray(proj3.k2hat)[None, ...])
 
-        to_Sell = ProjectToSell(ells=spectrum3.ells, size=6)
-        k3d = np.asarray(next(iter(spectrum3)).coords('k'))  # (nbins, 2) paired (k1, k2)
-        k1vec_B = k3d[:, 0, None, None] * np.asarray(to_Sell.k1hat)[None, ...]  # (nbins, nnodes, 3)
-        k2vec_B = k3d[:, 1, None, None] * np.asarray(to_Sell.k2hat)[None, ...]
-
-        def model_vector(x):
-            bias_params = {0: fid_bias | dict(zip(names, x))}
-            P3d = spectrum2_redshift_tracer(jnp.asarray(kvec_P), table, table_now, f, bias_params)  # (nk, nmu)
-            p_poles = to_poles(P3d)  # (nells2, nk)
-            B3d = spectrum3_redshift_tracer(jnp.asarray(k1vec_B), jnp.asarray(k2vec_B),
-                                            pk_callable, pknow_callable, f=f, bias_params=bias_params)
-            b_poles = to_Sell(B3d)  # (nells3, nbins)
-            return jnp.concatenate([p_poles.ravel(), b_poles.ravel()])
+    def model_vector(x):
+        bias, ct = split_ct(fid_bias | dict(zip(names, x)))
+        bias_params = {0: bias}
+        P3d = spectrum2_redshift_tracer(kvec2, table, table_now, f, bias_params, **ct)  # (nk, nmu)
+        p_poles = proj2(P3d)  # (nells2, nk)
+        # ell-major flattening, matching the window theory axis ordering
+        if window2_value is not None: p_poles = window2_value.dot(p_poles.ravel())
+        B3d = spectrum3_redshift_tracer(k1vec3, k2vec3, pk_callable, pknow_callable, f=f,
+                                        bias_params=bias_params, damping=damping)
+        b_poles = proj3(B3d)  # (nells3, nbins)
+        if window3_value is not None: b_poles = window3_value.dot(b_poles.ravel())
+        return jnp.concatenate([p_poles.ravel(), b_poles.ravel()])
 
     def chi2(x):
         r = jnp.asarray(data) - model_vector(x)
@@ -940,13 +1059,38 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
     value_and_grad = jax.jit(jax.value_and_grad(chi2))
 
     from scipy import optimize
-    res = optimize.minimize(value_and_grad, x0=np.array([fid_bias[name] for name in names]),
-                            jac=True, method='L-BFGS-B')
+    # The chi2 surface is multimodal: known basins at chi2 ~ 9300 (snb0 ~ 0.7 P_shot) and
+    # ~20000 (snb0 ~ 0 with runaway c1), and from the generic fiducials a single L-BFGS-B run
+    # lands in different ones between GPU-nondeterministic evaluations. This used to be handled
+    # by seeding from one hard-coded LRG z0.4-0.6 basin, which made successive runs comparable
+    # but (a) silently applied LRG values to every other tracer and (b) hid the multimodality
+    # rather than resolving it. Instead: start from the fiducials plus `nstart - 1` reproducibly
+    # jittered starts, and keep the best minimum. nstart=1 reproduces a single fiducial start.
+    start_bias = fid_bias | {
+        'b1': 1.9865219736478894, 'b2': -0.05916121802569938, 'bs': 2.370098252843952,
+        'b3nl': -0.5569108045707474, 'c1': -6.73919467852892, 'X_FoG': 1.2668246384542914,
+        'snb0': 2542.3372742906754, 'sn0': 250.02915481575982,
+        'alpha0': 3.119455045737235, 'alpha2': -23.060127927873825, 'alpha4': 7.865593628124254}
+    x0 = np.array([start_bias[name] for name in names])
+    rng = np.random.RandomState(42)
+    res = None
+    for istart in range(max(int(nstart), 1)):
+        xs = x0 if istart == 0 else x0 * (1. + 0.3 * rng.uniform(-1., 1., size=x0.size))
+        _res = optimize.minimize(value_and_grad, x0=xs, jac=True, method='L-BFGS-B')
+        if jax.process_index() == 0 and nstart > 1:
+            logger.info(f'  start {istart}: chi2 = {_res.fun:.1f}')
+        if res is None or _res.fun < res.fun:
+            res = _res
     best = dict(zip(names, np.asarray(res.x)))
     if jax.process_index() == 0:
         logger.info(f'Preliminary fit: {best}, chi2 = {res.fun:.1f} ({data.size} data points)')
 
-    theory = make_theory(fid_bias | best)
+    # The covariance wants the *connected* P / B / T: compute_spectrum3_covariance builds the
+    # shot-noise-renormalized P^(N), B^(N), T^(N) itself from its own `shotnoise` argument
+    # (cov3.py, get_theory).
+    stochastic = {} #'snb0': 0., 'sn0': 0.}
+    theory = make_theory(fid_bias | best | stochastic)
+    theory.bias = dict(fid_bias | best)  # record the actual best fit, not the zeroed copy
     theory.chi2 = float(res.fun)
     # Best-fit model multipoles at the data binning, to inspect the quality of the fit
     model = np.asarray(model_vector(jnp.asarray(res.x)))
@@ -954,7 +1098,7 @@ def run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=None, windo
     theory.spectrum2 = spectrum2.clone(value=model[:size2])
     theory.spectrum3 = spectrum3.clone(value=model[size2:])
     theory.data2, theory.data3 = spectrum2, spectrum3
-    types.ObservableTree([theory.spectrum2, theory.spectrum3, theory.data2, theory.data3], kind=['spectrum2', 'spectrum3', 'data2', 'data3']).write('../nb/debug_cov3/theory_mesh3_covariance.h5')
+    #types.ObservableTree([theory.spectrum2, theory.spectrum3, theory.data2, theory.data3], kind=['spectrum2', 'spectrum3', 'data2', 'data3']).write('../nb/debug_cov3/theory_mesh3_covariance.h5')
     return theory
 
 
@@ -1086,11 +1230,17 @@ def _compute_cov3_windows(get_data_randoms, fields=None, mattrs=None, edges=None
         if jax.process_index() == 0:
             logger.info('3-point covariance window computed')
 
-        # Interpolate the windows on a log-spaced grid for the Hankel transforms in the assembly
-        coords = jnp.logspace(-3, 4, 1024)
-        window2 = interpolate_window_function(window2, coords=coords, order=3)
+        # Interpolate the windows on a log-spaced grid for the Hankel transforms in the assembly.
+        #
+        # The grid must be fine AND wide, or the FFTlog integrand is under-sampled and the P
+        # covariance is progressively lost with k.
+        # window3 keeps the original grid: it is a 2-D (s1, s2) table.
+        # Untested beyond 2048 -- the thing to revisit if B ever becomes the limiting term.
+        coords2 = jnp.logspace(-3, 8, 8 * 1024)
+        coords3 = jnp.logspace(-3, 4, 1024)
+        window2 = interpolate_window_function(window2, coords=coords2, order=3)
         window3 = window3.map(lambda pole: pole.unravel())
-        window3 = interpolate_window_function(window3, coords=coords, order=3)
+        window3 = interpolate_window_function(window3, coords=coords3, order=3)
 
     return window2, window3
 
@@ -1563,3 +1713,99 @@ def compute_covariance_box_mesh3_spectrum(spectrum2: types.Mesh2SpectrumPoles, s
         covariance = compute_spectrum3_covariance(mattrs, mattrs, observable, theory=_restrict_theory(theory, terms=terms),
                                                   shotnoise=shotnoise, cache={})
     return covariance
+
+def compute_angular3_spectrum(*get_data_randoms, mattrs=None, edges=None, aic=None,
+                              method=None, norm: dict=None, cache=None):
+    r"""
+    Compute the angular bispectrum :math:`b_{\ell_1 \ell_2 \ell_3}`, binned in :math:`\ell`-bands,
+    from FKP fields with :mod:`jaxpower`.
+
+    Catalog positions are interpreted as directions on the sphere (they are normalized internally),
+    so the radial information is discarded and this measures the projected 3-point clustering.
+    The estimator integrates the product of band-filtered maps, normalized by the number of
+    triangles, see :class:`jaxpower.BinAngular3Spectrum`.
+
+    Parameters
+    ----------
+    get_data_randoms : callables
+        Functions that return dict of 'data', 'randoms' (optionally 'shifted') catalogs.
+        See :func:`prepare_jaxpower_particles` for details.
+    mattrs : dict, optional
+        Angular attributes, 'ellmax' (maximum multipole) and 'nside' (healpix resolution of the
+        band-filtered maps). Default is ``{'nside': 256, 'ellmax': 180}`` (:math:`\ell = 180` deg /
+        :math:`\theta`, so ``ellmax = 180`` is the degree scale). Take ``nside`` comfortably above
+        ``ellmax``: the estimator integrates a product of three maps, and its accuracy is set by the
+        healpix quadrature, which improves as :math:`1 / n_\mathrm{side}^2`. Unlike the power spectrum,
+        ``nside`` is required.
+        The estimator is not mesh-based, so no 3D mesh needs to be specified: the particles are laid
+        out (and sharded) on a coarse mesh of no consequence.
+    edges : array-like or dict, optional
+        :math:`\ell`-band edges, with keys 'min', 'max', 'step'. If ``None``, unit bands, which is
+        rarely what you want here: the number of band triplets grows as the cube of the number of bands.
+        See :class:`jaxpower.BinAngular3Spectrum` for details.
+    method : str, optional
+        'healpix' (default when ``nside`` is set) or 'direct', see :func:`compute_angular2_spectrum`.
+    norm : dict, optional
+        Optional arguments for :func:`jaxpower.compute_fkp_angular3_normalization`.
+    cache : dict, optional
+        Cache to store the binning class (reusable if ``ellmax`` and ``nside`` are the same).
+
+    Returns
+    -------
+    results : dict
+        Dictionary with key 'raw': the computed angular bispectrum (:class:`Angular3Spectrum`),
+        normalized and shot-noise subtracted.
+    """
+    from jaxpower import (create_sharding_mesh, FKPField, AngularAttrs, BinAngular3Spectrum,
+                          compute_angular3_spectrum, compute_fkp_angular3_normalization, compute_fkp_angular3_shotnoise)
+
+    aattrs = AngularAttrs(**(dict(nside=256, ellmax=180) | dict(mattrs or {})))
+    # Set up distributed computation across JAX devices
+    with create_sharding_mesh():
+        # IDS give a process-invariant random split for the normalization. The mesh only lays the
+        # particles out (and shards them) and is of no consequence here, so keep it coarse
+        all_particles = prepare_jaxpower_particles(*get_data_randoms, mattrs=dict(cellsize=50.), aic=aic, add_randoms=['IDS'])
+        # Attributes about the estimation (total weights, mesh geometry)
+        attrs = _get_jaxpower_attrs(*all_particles)
+
+        if cache is None: cache = {}
+        if norm is None: norm = {}
+        kw_norm = dict(norm)
+        # Skip None (nside is None for the pixel-free direct summation), which h5py cannot type
+        attrs.update({name: value for name, value in dict(aattrs).items() if value is not None})
+
+        # ell-band triplets, cached across calls
+        key = f'bin_angular3_spectrum_{aattrs.ellmax}_{aattrs.nside}'
+        bin = cache.get(key, None)
+        if bin is None:
+            bin = BinAngular3Spectrum(aattrs, edges=edges)
+        cache.setdefault(key, bin)
+
+        # Normalization: integral of nbar^3 / (4 pi). Split the randoms in 3 disjoint samples
+        # (by IDS, so the split does not depend on the number of processes) to drop the self-terms
+        all_fkp = [FKPField(particles['data'], particles['randoms']) for particles in all_particles]
+        norm = compute_fkp_angular3_normalization(*all_fkp, bin=bin,
+                                                  split=[(42, fkp.randoms.extra['IDS']) for fkp in all_fkp], **kw_norm)
+
+        # Shot noise from the shifted catalogs (reconstruction) when available
+        all_fkp = [FKPField(particles['data'], particles['shifted'] if particles.get('shifted', None) is not None else particles['randoms']) for particles in all_particles]
+        del all_particles
+        # Self-contained: the C_ell-like term is measured from the catalogs, not modelled
+        num_shotnoise = compute_fkp_angular3_shotnoise(*all_fkp, bin=bin, method=method)
+
+        jax.block_until_ready((norm, num_shotnoise))
+        if jax.process_index() == 0:
+            logger.info('Normalization and shotnoise computation finished')
+
+        # a_lm of the FKP field (data - alpha randoms), then the band-filtered maps and their product
+        spectrum = compute_angular3_spectrum(*all_fkp, bin=bin, method=method)
+        del all_fkp
+        spectrum = spectrum.clone(norm=norm, num_shotnoise=num_shotnoise, attrs=attrs)
+
+        jax.block_until_ready(spectrum)
+        if jax.process_index() == 0:
+            logger.info('Angular computation finished')
+
+        results = {'raw': spectrum}
+
+    return results

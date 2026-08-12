@@ -1,3 +1,5 @@
+"""Export RascalC covariance to lsstypes format."""
+
 from pathlib import Path
 
 import numpy as np
@@ -108,11 +110,10 @@ if __name__ == '__main__':
     for tracer, zrange in list_zrange:
         for region in ['GCcomb', 'NGC', 'SGC']:
             dp_covariance_fn = f'covariance_correlation_{tracer}_{region}_z{zrange[0]:.1f}-{zrange[1]:.1f}_default_FKP_lin.npy'
-            stats_dir = '/global/cfs/cdirs/desi/science/cai/desi-clustering/dr2/summary_statistics/bao/rascalc/'
-            kw = dict(stats_dir=stats_dir, weight='default-FKP', version='data-dr2-v1.1', tracer=tracer, region=region, zrange=zrange)
+            kw = dict(stats_dir=tools.base_stats_dir, project='bao/rascalc', weight='default-FKP', version='data-dr2-v1.1', tracer=tracer, region=region, zrange=zrange)
             covariance_fn = tools.get_stats_fn(kind='covariance_particle2_correlation', **kw)
             convert_covariance(dp_dir / dp_covariance_fn, covariance_fn, tracer=tracer)
-            
+
             dp_covariance_fn = f'covariance_correlation-recon_{tracer}_{region}_z{zrange[0]:.1f}-{zrange[1]:.1f}_default_FKP_lin.npy'
             covariance_fn = tools.get_stats_fn(kind='covariance_recon_particle2_correlation', **kw)
             convert_covariance(dp_dir / dp_covariance_fn, covariance_fn, tracer=tracer)

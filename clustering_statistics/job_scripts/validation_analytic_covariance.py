@@ -79,8 +79,10 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             method = 'smooth_mesh'
             window_mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None, 'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4)}
             window_mesh3_spectrum = {'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4), 'computed_batches': None} #[None]}
+            covariance_mesh3_spectrum = {'terms': 'PBT'}   # TEST: re-enable the trispectrum terms
             options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock), 
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
+                           covariance_mesh3_spectrum=covariance_mesh3_spectrum,
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
