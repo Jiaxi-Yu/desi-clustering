@@ -71,6 +71,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
     for imock in imocks:
         for region in regions:
             correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
+            correction = True
             auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
             cut = correction
             mesh2_spectrum = {'cut': cut, 'auw': auw}
@@ -145,7 +146,9 @@ if __name__ == '__main__':
     check_for_existing_measurements = False
     stats, postprocess = [], []
     #version = 'abacus-hf-dr2-v2-altmtl'
-    version = 'glam-uchuu-v2-altmtl'
+    #version = 'glam-uchuu-v2-altmtl'
+    #version = 'holi-v4-altmtl'
+    version = 'holi-v4-altmtl-maskedfraczpNN'
     #version = 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN'
     #version = 'glam-uchuu-v2-altmtl-maskedfraczpNN'
     #version = ('glam-uchuu-v2-altmtl', 'glam-uchuu-v2-altmtl-maskedfraczpNN')
@@ -164,7 +167,7 @@ if __name__ == '__main__':
     project = f'{analysis}/fiber_assignment_systematics'
     #project = f'{analysis}/fiber_assignment_systematics_tests'
     #project = f'{analysis}/fiber_assignment_systematics_ELG_{compweight}'
-    imocks = np.arange(25)
+    imocks = np.arange(10)
     #imocks = np.arange(3, 9)
     #imocks = np.arange(14, 25)
     #imocks = np.arange(12, 25)
@@ -207,12 +210,12 @@ if __name__ == '__main__':
     #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][2:]
     #stats = ['window_mesh3_spectrum']
     #stats = ['mesh2_spectrum', 'mesh3_spectrum', 'close_pair_correction'][:2]
-    stats = ['mesh2_spectrum', 'close_pair_correction'][:0]
+    stats = ['mesh2_spectrum', 'close_pair_correction'][:1]
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
-    weight = 'default-FKP'
+    #weight = 'default-FKP'
     #weight = 'default-FKP-bitwise-iip'
-    #weight = 'default-nn-FKP'
+    weight = 'default-nn-FKP'
     #weight = 'default-FKP-noimsys'
     #weight = 'default'
     #regions = ['NGC', 'SGC']

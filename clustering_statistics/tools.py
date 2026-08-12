@@ -11,6 +11,7 @@ Main functions
 """
 
 import os
+import re
 import time
 import logging
 from pathlib import Path
@@ -143,6 +144,10 @@ def get_simple_stats(stats):
         return 'spectrum2recon'
     elif stats == 'mesh3_spectrum':
         return 'spectrum3'
+    elif stats == 'angular2_spectrum':
+        return 'angular2'
+    elif stats == 'angular3_spectrum':
+        return 'angular3'
     elif stats == 'particle2_correlation':
         return 'correlation2'
     elif stats == 'recon_particle2_correlation':
@@ -455,7 +460,8 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     params : dict
         Dictionary of proposed fiducial parameters for the specified statistic kind and tracer.
     """
-    base = {"catalog": {}, "particle2_correlation": {},  "particle3_correlation": {}, "mesh2_spectrum": {}, "mesh3_spectrum": {}, "window_mesh2_spectrum_fm": {}}
+    base = {"catalog": {}, "particle2_correlation": {},  "particle3_correlation": {}, "mesh2_spectrum": {}, "mesh3_spectrum": {},
+            "angular2_spectrum": {}, "angular3_spectrum": {}, "window_mesh2_spectrum_fm": {}}
     propose_fiducial = {
         'BGS': {'nran': 3, 'recon': {'mode': 'recsym', 'bias': 1.5, 'smoothing_radius': 15., 'zrange': (0.1, 0.4)}},
         'LRG+LGE': {'nran': 10, 'recon': {'mode': 'recsym', 'bias': 1.9, 'smoothing_radius': 15.}, 'zrange': (0.4, 1.1),
@@ -509,6 +515,21 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
         propose_fiducial['particle2_correlation'].update(battrs={'s': np.linspace(0., 180., 181), 'mu': (np.linspace(-1., 1., 201), 'midpoint')})
         propose_fiducial['particle3_correlation'].update(battrs={'s': np.linspace(0., 160., 21), 'pole': (list(range(6)), 'firstpoint')}, selection_weights={tracer: functools.partial(compute_fiducial_selection_weights, tracer=tracer) for tracer in tracers})
 
+    # No angular integral constraint by default; set e.g. aic='hp64' per statistic to renormalize
+    # the randoms over the data in each healpix pixel
+    for stat in ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum']:
+        propose_fiducial[stat].setdefault('aic', None)
+
+    # Angular statistics: 'mattrs' is the angular geometry ('ellmax', 'nside'), not a 3D mesh -- the
+    # radial information is projected out and the routines lay the particles out on a coarse mesh of
+    # their own. ellmax = 180 is the degree scale (ell = 180 deg / theta). nside = None on the power
+    # spectrum selects the pixel-free direct summation; the bispectrum needs a grid, and wants nside
+    # well above ellmax since it integrates a product of three band-filtered maps. Its bands are
+    # roughly equally spaced in sqrt(ell), the number of band triplets growing as the cube of the
+    # number of bands.
+    propose_fiducial['angular2_spectrum'].update(mattrs={'nside': None, 'ellmax': 180}, edges={'min': 1, 'step': 10})
+    propose_fiducial['angular3_spectrum'].update(mattrs={'nside': 256, 'ellmax': 180}, edges=[1, 4, 10, 20, 44, 79, 124, 178])
+
     if 'protected' in analysis:
         propose_fiducial['mesh2_spectrum'].update(ells=(0,), edges={'min': 0.02, 'step': 0.001})
         propose_fiducial['mesh3_spectrum'].update(ells=[(0, 0, 0)])
@@ -548,7 +569,11 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum'] = dict(propose_fiducial['covariance_mesh2_spectrum'])
     _mattrs = propose_fiducial['covariance_mesh2_spectrum']['mattrs']
     propose_fiducial['covariance_mesh3_spectrum']['mattrs'] = {'meshsize': _mattrs['meshsize'] // 2, 'cellsize': 2. * _mattrs['cellsize']}
-    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PB' 
+    # 'PBT', not 'PB': the trispectrum enters Cov[B, B] as the P x T term, one of the four
+    # terms of Sugiyama et al. Eq. 28. It is the most expensive part of the assembly, which
+    # is why it was once dropped, but cost is not a reason to omit a term of the formula.
+    # (Its effect on the P blocks is separately measured at < 1%.)
+    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PBT'
     for name in ['covariance_mesh2_spectrum', 'covariance_particle2_correlation']:
         propose_fiducial[name.replace('covariance_', 'covariance_recon_')] = propose_fiducial[name]
 
@@ -565,7 +590,7 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['combine_window_mesh2_spectrum'] = {'effect': 'RIC+AMR', 'method': 'spline'}
 
     if "window_mesh2_spectrum_fm" in kind:
-        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
+        _zranges = zrange or {"BGS": [(0.1, 0.4)], "LRG": [(0.4, 1.1)], "LGE": [(0.4, 1.1)], "ELG": [(0.8, 1.6)], "QSO": [(0.8, 3.5)], "LRG+ELG": [(0.8, 1.1)], "LRGxLGE": [(0.8, 1.1)], "LGExELG": [(0.8, 1.1)], "LRGxELG": [(0.8, 1.1)], "LRGxQSO": [(0.8, 1.1)], "ELGxQSO": [(0.8, 1.6)]}[simple_tracer]
 
         if simple_tracers[0] not in ["BGS", "LRG", "LGE", "ELG", "QSO"]:
             warnings.warn(f"tracer {tracer} is not supported for window_mesh2_spectrum_fm, skipping")
@@ -645,6 +670,15 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
                 amr_regions_zranges=list(itertools.product(propose_photoregions[simple_tracers[0]], propose_regression_zranges[simple_tracers[0]])),
             )
 
+    if "shotnoise_mesh2_spectrum_fm" in kind:
+        from copy import deepcopy
+
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"] = deepcopy(propose_fiducial["window_mesh2_spectrum_fm"])
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["batch_size"]
+        del propose_fiducial["shotnoise_mesh2_spectrum_fm"]["unitary_amplitude"]
+
+        propose_sigma = dict.fromkeys(["BGS", "LRG", "LGE", "ELG", "QSO"], 10.0) | dict.fromkeys(["LRGxLGE", "LRGxELG", "LRGxQSO", "ELGxQSO"], (10.0, 10.0))
+        propose_fiducial["shotnoise_mesh2_spectrum_fm"].update(sigma=propose_sigma[simple_tracer])
     return propose_fiducial[kind]
 
 def _combine_tracer_catalogs(catalogs, nz_files, biases, P0, zmin, zmax, dz=0.01, kind='data', combine=None):
@@ -913,6 +947,10 @@ def fill_fiducial_options(kwargs, analysis='full_shape'):
                             if options[stat].get('optimal_weights', None) is not None:
                                 warnings.warn('Removing optimal_weights from mesh2_spectrum as OQE not in weights')
                             options[stat]['optimal_weights'] = None
+    # Angular statistics have no reconstructed variant, and take no 3D mesh
+    for stat in ['angular2_spectrum', 'angular3_spectrum']:
+        fiducial_options = propose_fiducial(stat, tracer=tracers, analysis=analysis)
+        options[stat] = fiducial_options | options.get(stat, {})
     for stat in ['window_mesh2_spectrum', 'window_mesh3_spectrum', 'window_mesh2_spectrum_fm']:
         spectrum_options = options[stat.replace('window_', '').replace('_fm', '')]
         spectrum_options = {key: value for key, value in spectrum_options.items() if key in ['selection_weights', 'optimal_weights', 'basis']}
@@ -1127,7 +1165,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
 
-        elif version == 'holi-v4-altmtl-NN':
+        elif version in ['holi-v4-altmtl-NN', 'holi-v4-altmtl-maskedfraczpNN']:
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/holi_v4/altmtl'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
             ext = 'h5'
@@ -1165,13 +1203,13 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             if 'full' in kind:
                 cat_dir = cat_dir.parent
-        
+
         elif version == 'glam-uchuu-v2-complete':
             # TODO: Decide where to save complete version of the clustering catalogs.
             base_dir = base_stats_dir / 'auxiliary_data' / version
             cat_dir = base_dir / f'complete{imock:d}/loa-v1/mock{imock:d}/LSScats'
             ext = 'h5'
-            
+
         elif version == 'glam-uchuu-bgs-altmtl':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/glam_bgs/'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats'
@@ -1245,7 +1283,7 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
             ext = 'h5'
             if kind == 'forfa_data':
                 return base_dir / f'forFA{imock:d}.fits'
-        
+
         elif version == 'abacus-hf-dr2-v2-altmtl-maskedfraczpNN':
             base_dir = desi_dir / f'mocks/cai/LSS/DA2/mocks/AbacusHF_DR2v2'
             cat_dir = base_dir / f'altmtl{imock:d}/loa-v1/mock{imock:d}/LSScats/NN'
@@ -1368,7 +1406,7 @@ def _decode_catalog_options(kwargs):
 
 
 def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', project='', kind='mesh2_spectrum',
-                 auw=None, cut=None, extra='', ext='h5', **kwargs):
+                 auw=None, cut=None, aic=None, extra='', ext='h5', **kwargs):
     """
     Return measurement filename for given parameters.
 
@@ -1392,6 +1430,8 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
         Whether to include angular upweighting.
     cut : bool, optional
         Whether to include theta cut.
+    aic : str, optional
+        Angular integral constraint applied to the randoms, e.g. 'hp64', see :func:`renormalize_randoms_over_data_aic`.
     weight : str
         Weight type. Options are 'default-FKP', 'defaut-FKP-bitwise', etc.
     imock : int, str, list of int, optional
@@ -1442,6 +1482,7 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
     weight = join_tracers(check_is_not_none('weight'))
     auw = '_auw' if auw else ''
     cut = '_thetacut' if cut else ''
+    aic = f'_aic-{aic}' if aic else ''
     extra = f'_{extra}' if extra else ''
 
     battrs = kwargs.get('battrs', None)
@@ -1479,7 +1520,7 @@ def get_stats_fn(stats_dir=Path(os.getenv('SCRATCH', '.')) / 'measurements', pro
                 templates = [templates]
             templates = '-'.join(['syst'] + list(templates))
             extra = f'{extra}-{templates}' if extra else f'_{templates}'
-    basename = f'{kind}_{tracer}{zrange}_{region}_weight-{weight}{auw}{cut}{extra}{imock}.{ext}'
+    basename = f'{kind}_{tracer}{zrange}_{region}_weight-{weight}{aic}{auw}{cut}{extra}{imock}.{ext}'
     return stats_dir / basename
 
 
@@ -1852,7 +1893,7 @@ def read_catalog(kind=None, concatenate=True, get_catalog_fn=get_catalog_fn,
         raise IOError(f'Catalogs {[fn for fn, ex in exists.items() if not ex]} do not exist!')
 
     kwargs.pop('combine', None)
-    
+
     complete_data = None
 
     if isinstance(complete, dict):
@@ -2461,9 +2502,14 @@ def combine_stats(observables):
                 attrs[name] = sum([list(observable.attrs[name]) for observable in observables], start=[])
         name = 'zeff'
         if name in attrs:
-            norm_zeff = [observable.attrs[f'norm_{name}'] for observable in observables]
-            attrs[name] = np.average([observable.attrs[name] for observable in observables], weights=norm_zeff)
-            attrs[f'norm_{name}'] = np.sum(norm_zeff)
+            if all(f'norm_{name}' in observable.attrs for observable in observables):
+                norm_zeff = [observable.attrs[f'norm_{name}'] for observable in observables]
+                attrs[name] = np.average([observable.attrs[name] for observable in observables], weights=norm_zeff)
+                attrs[f'norm_{name}'] = np.sum(norm_zeff)
+            else:
+                # Cannot recombine; better no effective redshift than the first input's one
+                attrs.pop(name)
+                attrs.pop(f'norm_{name}', None)
         return attrs
 
     def combine_attrs(observable, observables):
@@ -2472,7 +2518,10 @@ def combine_stats(observables):
     # Combine attributes
     if isinstance(observable, (types.WindowMatrix, types.CovarianceMatrix)):
         window = observable
-        observable = window = window.clone(observable=combine_attrs(window.observable, [window.observable for window in observables]))
+        # Matrices carry their own attrs, on top of those of the observable they are attached to:
+        # both must be recombined, else the matrix-level attrs are silently those of the first input.
+        observable = window = window.clone(observable=combine_attrs(window.observable, [window.observable for window in observables]),
+                                           attrs=_combine_attrs(observables))
     else:
         observable = combine_attrs(observable, [observable for observable in observables])
 
@@ -2710,8 +2759,15 @@ def check_if_requires_renormalization(weight='', **kwargs):
     return 'compondata' in weight
 
 
-def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
-    """Renormalize randoms / data in each region."""
+def renormalize_randoms_over_data_regions(randoms, data, tracer=None, regions=None):
+    """
+    Renormalize randoms / data in each region.
+
+    Returns
+    -------
+    randoms : Catalog
+        A shallow copy of ``randoms``, with a rescaled 'INDWEIGHT'; the input is left untouched.
+    """
     sum_data_weights, sum_randoms_weights = [], []
     if regions is None:
         regions = get_renormalization_regions(tracer)
@@ -2723,9 +2779,82 @@ def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
 
     sum_data_weights, sum_randoms_weights = np.array(sum_data_weights), np.array(sum_randoms_weights)
     alphas = sum_data_weights / sum_randoms_weights / (sum(sum_data_weights) / sum(sum_randoms_weights))
+    # build the new weights before attaching them, so the input array is never written to
+    weights = randoms['INDWEIGHT'].copy()
     for region, alpha in zip(regions, alphas):
         mask_randoms = select_region(randoms['RA'], randoms['DEC'], region=region)
-        randoms['INDWEIGHT'][mask_randoms] *= alpha
+        weights[mask_randoms] *= alpha
+    randoms = randoms.copy()
+    randoms['INDWEIGHT'] = weights
+    return randoms
+
+
+def renormalize_randoms_over_data_aic(randoms, data, nside=None, aic=None):
+    """
+    Renormalize randoms / data in each healpix pixel.
+
+    The randoms weights are rescaled, pixel by pixel, so that the local randoms-to-data ratio matches
+    the global one. This projects out the angular density fluctuations resolved at ``nside``.
+
+    Pixels holding randoms but no data get a zero weight -- there is no data there to trace. Pixels
+    holding data but no randoms cannot be renormalized and are left alone.
+
+    Parameters
+    ----------
+    randoms : Catalog
+        Catalog of randoms.
+    data : Catalog
+        Data catalog.
+    nside : int, optional
+        Healpix resolution of the renormalization pixels. Default is 64 (~1 deg pixels).
+    aic : str, optional
+        Angular integral constraint specification, e.g. 'hp64', as an alternative way of giving
+        ``nside``. Providing both is only allowed if they agree.
+
+    Returns
+    -------
+    randoms : Catalog
+        A shallow copy of ``randoms``, with a rescaled 'INDWEIGHT'; the input is left untouched.
+
+    Notes
+    -----
+    Pixelization follows the nested scheme. The scheme only relabels pixels,
+    so the renormalization itself is unchanged by it, as long as data and randoms share it.
+    """
+    import healpy as hp
+
+    if aic is not None:
+        match = re.fullmatch(r'hp(\d+)', str(aic))
+        if match is None:
+            raise ValueError(f"unknown angular integral constraint {aic!r}; expected e.g. 'hp64'")
+        aic_nside = int(match.group(1))
+        if nside is not None and nside != aic_nside:
+            raise ValueError(f'conflicting resolutions: nside={nside} and aic={aic!r} (nside={aic_nside})')
+        nside = aic_nside
+    if nside is None:
+        nside = 64
+
+    npix = 12 * nside**2
+    mpicomm = getattr(data, 'mpicomm', None)
+
+    def sum_weights_per_pixel(catalog):
+        pixels = hp.ang2pix(nside, catalog['RA'], catalog['DEC'], nest=True, lonlat=True)
+        sum_weights = np.bincount(pixels, weights=catalog['INDWEIGHT'], minlength=npix)
+        if mpicomm is not None:
+            sum_weights = mpicomm.allreduce(sum_weights)
+        return pixels, sum_weights
+
+    pixels_data, sum_data_weights = sum_weights_per_pixel(data)
+    pixels_randoms, sum_randoms_weights = sum_weights_per_pixel(randoms)
+
+    # local ratio, normalized to the global one, so the total randoms weight is preserved
+    alphas = np.divide(sum_data_weights, sum_randoms_weights, out=np.zeros_like(sum_data_weights),
+                       where=sum_randoms_weights != 0.)
+    alphas /= sum_data_weights.sum() / sum_randoms_weights.sum()
+    randoms = randoms.copy()
+    randoms['INDWEIGHT'] = randoms['INDWEIGHT'] * alphas[pixels_randoms]
+    return randoms
+
 
 
 def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=(), ignore_ftile=False):
@@ -2925,7 +3054,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
     P0 = {'BGS': 7e3, 'LRG': 1e4, 'LGE': 1e4, 'ELG': 4e3, 'QSO': 6e3}[tracer]
     if 'R_MAG_ABS' in full_data.columns():
         logger.info('Using R_MAG_ABS in Full data')
-        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN', 'R_MAG_ABS']] 
+        full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN', 'R_MAG_ABS']]
         forfa_data = forfa_data[['TARGETID', 'RSDZ']]
     elif 'TRACER_TYPE' in forfa_data.columns():
         logger.info('Using TRACER_TYPE in forFA data')
@@ -2935,7 +3064,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
         full_data = full_data[['TARGETID', 'RA', 'DEC', 'NTILE', 'ZWARN']]
         forfa_data = forfa_data[['TARGETID', 'RSDZ']]
     forfa_data['Z'] = forfa_data.pop('RSDZ')
-    
+
     # 'FRACZ_TILELOCID', 'FRAC_TLOBS_TILES'
     _, full_index, forfa_index = np.intersect1d(full_data['TARGETID'], forfa_data['TARGETID'], return_indices=True)
     data = full_data[full_index]
@@ -3007,7 +3136,7 @@ def complete_from_full_data(forfa_data, full_data, nz, tracer, remove_contaminan
                 # logger.info(f"{(data['TRACER_TYPE'] == _tracer.encode()).sum()}")
                 downsample_mag = data['TRACER_TYPE'] == _tracer.encode() # TODO: figure out where the values of 'TRACER_TYPE' got converted to byte strings)
                 data = data[downsample_mag]
-                
+
             # if True: #'ANY' in tracer:
             #     fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
             #     fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))
@@ -3114,7 +3243,7 @@ def altmtl_from_full_data(forfa_data, full_data, nz, tracer, seed=42, remove_con
         zfrac = 0.966
         zrange = (0.4, 1.1)
 
-    if tracer.startswith('BGS'):        
+    if tracer.startswith('BGS'):
         if True: #'ANY' in tracer:
             fit_a = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_a.dat"))
             fit_b = np.poly1d(np.loadtxt("/pscratch/sd/z/zxzhai/DESI_LSS/BGS_ANY_zmagcut_b.dat"))

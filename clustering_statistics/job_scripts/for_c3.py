@@ -5,10 +5,6 @@ To create and spawn the tasks on NERSC, use the following commands:
 ```bash
 salloc -N 1 -C "gpu&hbm80g" -t 04:00:00 --gpus 4 --qos interactive --account desi_g
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
-python desipipe_abacus_mocks.py          # create the list of tasks
-desipipe tasks -q abacus_mocks           # check the list of tasks
-desipipe spawn -q abacus_mocks --spawn   # spawn the jobs
-desipipe queues -q abacus_mocks          # check the queue
 ```
 """
 import os
@@ -27,16 +23,16 @@ mode = 'interactive'
 #mode = 'slurm'
 
 if mode == 'slurm':
-    queue = Queue('abacus_mocks2')
+    queue = Queue('for_c3')
     queue.clear(kill=False)
 
     output, error = 'slurm_outputs/abacus_mocks/slurm-%j.out', 'slurm_outputs/abacus_mocks/slurm-%j.err'
     kwargs = {}
-    environ = Environment('nersc-cosmodesi', command=['module unload desi-clustering'])
+    environ = Environment('nersc-cosmodesi', command=['module unload desi-clustering jaxpower'])
     tm = TaskManager(queue=queue, environ=environ)
     tm = tm.clone(scheduler=dict(max_workers=20), provider=dict(provider='nersc', time='03:00:00',
                                 mpiprocs_per_worker=4, output=output, error=error, constraint='gpu'))
-    tm80 = tm.clone(provider=dict(provider='nersc', time='10:00:00',
+    tm80 = tm.clone(provider=dict(provider='nersc', time='06:00:00',
                                 mpiprocs_per_worker=4, output=output, error=error, constraint='gpu&hbm80g'))
     tmw = tm.clone(scheduler=dict(max_workers=1), provider=dict(provider='nersc', time='10:00:00',
                     mpiprocs_per_worker=2250, nodes_per_worker=25, output=output, error=error, stop_after=1, constraint='cpu'))
@@ -71,6 +67,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
     for imock in imocks:
         for region in regions:
             correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
+            correction = True
             auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
             cut = correction
             mesh2_spectrum = {'cut': cut, 'auw': auw}
@@ -92,7 +89,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
-            options = fill_fiducial_options(options, analysis=analysis)
+            options = fill_fiducial_options(options, analysis='full_shape')
 
             for itracer in options['catalog']:
                 #options['recon'][itracer]['nran'] = 18
@@ -151,10 +148,10 @@ if __name__ == '__main__':
     #version = ('glam-uchuu-v2-altmtl', 'glam-uchuu-v2-altmtl-maskedfraczpNN')
     #version = 'abacus-2ndgen-dr2-complete'
     #version = 'abacus-2ndgen-dr2-altmtl'
-    version = 'data-dr2-v2'
+    #version = 'data-dr2-v2'
     #version = 'data-dr2-test-maskedfracz'
     #version = 'data-dr2-test-maskedfraczpNN'
-    #version = 'data-dr2-v2-cmblens'
+    version = 'data-dr2-v2-cmblens'
     analysis = 'full_shape_protected'
     cat_dir = None
     #compweight = 'tilelocid-LRG1'
@@ -185,8 +182,8 @@ if __name__ == '__main__':
     # run fiducial full_shape
     #tracers = ['BGS', 'LRG', 'ELG', 'QSO'] #[1:2]
     #tracers = [('LRG', 'ELG')]
-    #tracers = ['ELG', 'LRG'][:1]
-    tracers = ['QSO']
+    tracers = ['ELG', 'LRG'][:1]
+    #tracers = ['QSO']
     #tracers = ['ELG', 'QSO'][:1]
     #tracers = ['LRG', 'QSO']
     # run BGS
@@ -196,18 +193,13 @@ if __name__ == '__main__':
     #tracers = ['BGS_ANY-02']
 
     # run data_splits for lensing group with full_shape setup
-    #stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum']
+    stats = ['mesh2_spectrum', 'window_mesh2_spectrum', 'covariance_mesh2_spectrum'][:2]
     #stats = ['mesh2_spectrum', 'close_pair_correction']
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
-    weight = 'default-FKP'
-    #weight = 'default-FKP-bitwise-iip'
-    #weight = 'default-nn-FKP'
-    #weight = 'default-FKP-noimsys'
-    #weight = 'default'
     regions = ['NGC', 'SGC', 'N', 'NGCnoN', 'S', 'SGCnoDES']  #galactic and imaging regions
     regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i:d}' for i in [40, 60]] #lensing regions
-    #regions = ['SGCnoDES', 'DES']
+    #regions = ['PLANCK_PR4'] + [f'GAL0{i:d}' for i in [40, 60]]
     max_mocks_per_batch = 5
 
     onthefly = None
@@ -220,38 +212,38 @@ if __name__ == '__main__':
     #onthefly = 'complete'
     #onthefly = 'altmtl'
 
-    for tracer in tracers:
-        if 'BGS_BRIGHT-02' not in tracer:
-            tracer = tools.get_full_tracer(tracer, version=version)
-        if 'png' in analysis:
-            # do not compute measurements for overlapping redshifts
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
-        else:
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
-        zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)]#[1:]
+    for weight in ['default-FKP-nn-noimsys', 'default-FKP-nn-wsys-imlin_nocib', 'default-FKP-nn-wsys-sn']:
+        for tracer in tracers:
+            if 'BGS_BRIGHT-02' not in tracer:
+                tracer = tools.get_full_tracer(tracer, version=version)
+            if 'png' in analysis:
+                # do not compute measurements for overlapping redshifts
+                zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
+            else:
+                zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
 
-        def get_run_stats():
-            if mode == 'interactive':
-                return run_stats
-            _tm = tm80
-            if tracer in ['LRG']:
+            def get_run_stats():
+                if mode == 'interactive':
+                    return run_stats
                 _tm = tm80
-            if any('window_mesh3' in stat for stat in stats):
-                _tm = tmw
-            return _tm.python_app(run_stats)
-
-        run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, analysis=analysis, onthefly=onthefly, zranges=zranges, regions=regions, weight=weight, postprocess=postprocess, cat_dir=cat_dir)
-
-        if check_for_existing_measurements:
-            exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer,
-                                                                                           region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
-            imocks = exists[1]['imock']
-        if True:
-            if any('covariance' in stat for stat in stats):
-                get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
-            elif stats:
-                batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
-                for _imocks in batch_imocks:
-                    get_run_stats()(imocks=_imocks, stats=stats, **run_stats_kws)
-        if postprocess:
-            postprocess_stats(imocks=imocks, **run_stats_kws)
+                if tracer in ['LRG']:
+                    _tm = tm80
+                if any('window_mesh3' in stat for stat in stats):
+                    _tm = tmw
+                return _tm.python_app(run_stats)
+    
+            run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, analysis=analysis, onthefly=onthefly, zranges=zranges, regions=regions, weight=weight, postprocess=postprocess, cat_dir=cat_dir)
+    
+            if check_for_existing_measurements:
+                exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer,
+                                                                                               region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
+                imocks = exists[1]['imock']
+            if True:
+                if any('covariance' in stat for stat in stats):
+                    get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
+                elif stats:
+                    batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
+                    for _imocks in batch_imocks:
+                        get_run_stats()(imocks=_imocks, stats=stats, **run_stats_kws)
+            if postprocess:
+                postprocess_stats(imocks=imocks, **run_stats_kws)

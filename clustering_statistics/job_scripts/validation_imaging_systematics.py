@@ -5,10 +5,6 @@ To create and spawn the tasks on NERSC, use the following commands:
 ```bash
 salloc -N 1 -C "gpu&hbm80g" -t 04:00:00 --gpus 4 --qos interactive --account desi_g
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
-python desipipe_abacus_mocks.py          # create the list of tasks
-desipipe tasks -q abacus_mocks           # check the list of tasks
-desipipe spawn -q abacus_mocks --spawn   # spawn the jobs
-desipipe queues -q abacus_mocks          # check the queue
 ```
 """
 import os
@@ -73,11 +69,20 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
             auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
             cut = correction
-            mesh2_spectrum = {'cut': cut, 'auw': auw}
+            aic = 'hp64'
+            mesh2_spectrum = {'cut': cut, 'auw': auw, 'aic': aic}
             window_mesh2_spectrum = {'cut': cut}
-            mesh3_spectrum = {'auw': auw}
-            mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
+            mesh3_spectrum = {'auw': auw, 'aic': aic}
+            #mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
             window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
+            # Angular statistics, up to ellmax = 180 ~ 1 deg (ell = 180 deg / theta).
+            # nside = 256 keeps ellmax well below 2 * nside, which matters most for the bispectrum:
+            # it integrates a product of three band-filtered maps, so its accuracy is set by the
+            # healpix quadrature (the error falls as 1 / nside^2).
+            angular2_spectrum = {'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': {'min': 1, 'step': 1}}
+            # Bands roughly equally spaced in sqrt(ell) (~2.2 apart above ell = 20), with extra
+            # bands at low ell. 7 bands -> 51 valid band triplets.
+            angular3_spectrum = {'mattrs': {'nside': 256, 'ellmax': 180}, 'edges': [1, 4, 10, 20, 44, 79, 124, 178]}
             mode = 'smu'
             if mode == 'smu':
                 particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 40., 41), mu=(np.linspace(-1., 1., 201), 'midpoint'))}
@@ -91,6 +96,7 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock),
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
+                           angular2_spectrum=angular2_spectrum, angular3_spectrum=angular3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
             options = fill_fiducial_options(options, analysis=analysis)
@@ -155,14 +161,16 @@ if __name__ == '__main__':
     version = 'data-dr2-v2'
     #version = 'data-dr2-test-maskedfracz'
     #version = 'data-dr2-test-maskedfraczpNN'
-    analysis = 'full_shape_protected'
+    #analysis = 'full_shape_protected'
+    analysis = 'full_shape'
     cat_dir = None
     #compweight = 'tilelocid-LRG1'
     #compweight = 'tilelocid-LRG0'
     #cat_dir = tools.base_stats_dir / f'auxiliary_data/fiber_assignment_systematics_ELG_{compweight}' / version
     #cat_dir = tools.desi_dir / f'survey/catalogs/DA2/LSS/loa-v1/LSScats/test/maskedfraczpNN'
 
-    project = f'{analysis}/imaging_systematics_tests'
+    #project = f'{analysis}/imaging_systematics_tests'
+    project = f'{analysis}/angular_systematics'
     #project = f'{analysis}/fiber_assignment_systematics_tests'
     #project = f'{analysis}/fiber_assignment_systematics_ELG_{compweight}'
     imocks = np.arange(25)
@@ -187,18 +195,18 @@ if __name__ == '__main__':
     #tracers = [('LRG', 'ELG')]
     #tracers = ['ELG', 'LRG'][:1]
     #tracers = ['QSO']
-    tracers = ['LRG', 'QSO'][1:]
+    tracers = ['LRG', 'QSO']
     # run BGS
     #version = 'abacus-2ndgen-dr2-altmtl'
     #tracers = ['BGS_BRIGHT']
     #tracers = ['BGS_BRIGHT-02']
     #tracers = ['BGS_ANY-02']
 
-    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][1:2]
+    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][:2]
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
     #weight = 'default-FKP'
-    weight = 'default-FKP-noimsys'
+    #weight = 'default-FKP-noimsys'
     #weight = 'default'
     #regions = ['NGC', 'SGC']
     regions = ['NGC', 'SGC']
@@ -215,48 +223,50 @@ if __name__ == '__main__':
     #onthefly = 'complete'
     #onthefly = 'altmtl'
 
-    for tracer in tracers:
-        if 'BGS_BRIGHT-02' not in tracer:
-            tracer = tools.get_full_tracer(tracer, version=version)
-        if 'png' in analysis:
-            # do not compute measurements for overlapping redshifts
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
-        else:
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
-        #zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][3:]
-
-        def get_run_stats():
-            if mode == 'interactive':
-                return run_stats
-            _tm = tm80
-            if tracer in ['LRG']:
+    for weight in ['default-FKP', 'default-FKP-noimsys']:
+        for tracer in tracers:
+            if 'BGS_BRIGHT-02' not in tracer:
+                tracer = tools.get_full_tracer(tracer, version=version)
+            if 'png' in analysis:
+                # do not compute measurements for overlapping redshifts
+                zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
+            else:
+                zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+            #zranges = [(0.4, 1.1)]
+            #zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][3:]
+    
+            def get_run_stats():
+                if mode == 'interactive':
+                    return run_stats
                 _tm = tm80
-            if any('window_mesh3' in stat for stat in stats):
-                _tm = tmw
-            return _tm.python_app(run_stats)
-
-        run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, analysis=analysis, onthefly=onthefly, zranges=zranges, regions=regions, weight=weight, postprocess=postprocess, cat_dir=cat_dir)
-
-        if check_for_existing_measurements:
-            exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer,
-                                                                                           region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
-            imocks = exists[1]['imock']
-        if True:
-            if all('window' in stat for stat in stats):
-                _imocks = imocks[:1]
-                nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
-                if nbatches >= 1:
-                    # Add dependence on other tasks
-                    get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
-            elif any('covariance' in stat for stat in stats):
-                get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
-            elif stats:
-                batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
-                for _imocks in batch_imocks:
-                    get_run_stats()(imocks=_imocks, stats=stats, **run_stats_kws)
-        if postprocess:
-            postprocess_stats(imocks=imocks, **run_stats_kws)
+                if tracer in ['LRG']:
+                    _tm = tm80
+                if any('window_mesh3' in stat for stat in stats):
+                    _tm = tmw
+                return _tm.python_app(run_stats)
+    
+            run_stats_kws = dict(tracer=tracer, stats_dir=stats_dir, project=project, version=version, analysis=analysis, onthefly=onthefly, zranges=zranges, regions=regions, weight=weight, postprocess=postprocess, cat_dir=cat_dir)
+    
+            if check_for_existing_measurements:
+                exists, missing = tools.checks_if_exists_and_readable(get_fn=functools.partial(tools.get_catalog_fn, tracer=tracer[0] if isinstance(tracer, (list, tuple)) else tracer,
+                                                                                               region='NGC', version=version), test_if_readable=False, imock=imocks)[:2]
+                imocks = exists[1]['imock']
+            if True:
+                if all('window' in stat for stat in stats):
+                    _imocks = imocks[:1]
+                    nbatches = 1
+                    tasks = []
+                    for ibatch in range(nbatches):
+                        task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
+                        tasks.append(task)
+                    if nbatches >= 1:
+                        # Add dependence on other tasks
+                        get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
+                elif any('covariance' in stat for stat in stats):
+                    get_run_stats()(imocks=imocks[:1], stats=stats, **run_stats_kws)
+                elif stats:
+                    batch_imocks = np.array_split(imocks, max((len(imocks) + max_mocks_per_batch - 1) // max_mocks_per_batch, 1)) if len(imocks) > max_mocks_per_batch else [imocks]
+                    for _imocks in batch_imocks:
+                        get_run_stats()(imocks=_imocks, stats=stats, **run_stats_kws)
+            if postprocess:
+                postprocess_stats(imocks=imocks, **run_stats_kws)

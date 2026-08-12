@@ -145,6 +145,17 @@ def run_stats(cat_dir=None, stats_dir=None, tracer='LRG', zranges=[0.4, 1.1], we
                 if 'wsys' in weight:
                     options = _update_regression_maps(options, weight)
 
+            if 'shotnoise_mesh2_spectrum_fm' in stats:
+                options['catalog']['nran'] = 2  # not enough memory to do with more randoms ... 
+                options['catalog']['keep_columns'] = ['RA', 'DEC', 'Z', 'POSITION', 'NX', 'TARGETID', 'WEIGHT_FKP']  # add WEIGHT_FKP for the foward model
+
+                options['shotnoise_mesh2_spectrum_fm'] = {}
+                if 'spectrum_regions_zranges' in kwargs:
+                    options['shotnoise_mesh2_spectrum_fm']['spectrum_regions_zranges'] = kwargs['spectrum_regions_zranges']
+                options['shotnoise_mesh2_spectrum_fm']['n_realizations'] = 30
+                options['shotnoise_mesh2_spectrum_fm']['seeds'] = [75, 79, 59, 37, 88, 69, 18, 30, 84, 84, 
+                                                                   18, 10, 69, 92, 45, 99, 81, 3, 70, 7, 55,
+                                                                   74, 55, 85, 60, 23, 82, 42, 65, 49]
 
             compute_stats_from_options(stats, get_stats_fn=get_stats_fn, cache=cache, analysis='local_png', **options)
 
@@ -193,11 +204,8 @@ def collect_argparser():
     parser.add_argument('--blinded', action='store_true', help='Run with blinded data or not.')
 
     parser.add_argument('--todo', nargs='+', type=str, default=None, help='Which activities to do?', 
-                        choices=['spectrum', 'window', 'covariance', 'geo', 'ric', 'amr'])
+                        choices=['spectrum', 'window', 'covariance', 'geo', 'ric', 'amr', 'sn'])
 
-    parser.add_argument('--geo', action='store_true', help='Compute the forward model of the window function for geometrical part only.')
-    parser.add_argument('--ric', action='store_true', help='Include RIC in the forward model of the window.')
-    parser.add_argument('--amr', action='store_true', help='Include AMR in the forward model of the window. Do not use without RIC.')
     parser.add_argument('--ellsout', nargs='+', type=int, default=None, help='For which mulitpoles the forward model of the window function is computed. If None, compute for each mulitpoles available into the corresponding power spectrum.')
 
     args = parser.parse_args()
@@ -220,6 +228,9 @@ if __name__ == '__main__':
     srun -n 4 python desipipe_data_png.py --interactive --blinded --todo geo --ellsout 0 2 --tracer QSO
     srun -n 4 python desipipe_data_png.py --interactive --blinded --todo ric --ellsout 0 2 --tracer QSO
     srun -n 4 python desipipe_data_png.py --interactive --blinded --todo ric amr --ellsout 0 2 --tracer LRGxELGnotqso
+
+    # run shotnoise template forward model:
+    srun -n 4 python desipipe_data_png.py --interactive --blinded --todo sn --tracer QSO
 
     """
     from clustering_statistics import setup_logging, tools
@@ -276,7 +287,9 @@ if __name__ == '__main__':
         zranges = tools.propose_fiducial(kind='zranges', tracer=tracer, analysis='local_png')[:1] if args.zranges is None else list(zip(args.zranges[::2], args.zranges[1::2]))
 
         weights = ['default-fkp-oqe', 'default-fkp'][:1]
+        
         # Choice of imaging systematics avaialble in the catalogs: https://desi.lbl.gov/trac/wiki/keyprojects/Y3-DR/LSScat/imaging_systematics
+        #weights = ['default-fkp-oqe-wsys-imlin_newzbin2']
         if tracer == 'LRG_zcmb':
             weights += ['default-fkp-oqe-wsys-imlin_finezbin_allebvcmb']
         elif tracer == ('LRG_zcmb', 'QSO'):
@@ -288,16 +301,18 @@ if __name__ == '__main__':
         elif tracer == ('ELGnotqso', 'QSO'):
             weights += [('default-fkp-oqe-wsys-imlin', 'default-fkp-oqe')]
 
-        #weights = ['default-fkp-oqe-wsys-imlin_newzbin2']
 
         logger.info(f'{tracer=}, {zranges=}, {weights=}')
 
-
-        # Computing forward model of the window?
+        # Compute power spectrum / analytical window matrix / analytical covariance?
+        analytical = ('spectrum' in args.todo) or  ('window' in args.todo) or ('covariance' in args.todo)
+        # Computing window forward model?
         fm_window = ('geo' in args.todo) or ('ric' in args.todo) or ('amr' in args.todo)
+        # Compute shotnoise template forward model ?
+        fm_shotnoise = ('sn' in args.todo)
 
         # Compute power spectrum, window matrix, analytical covariance: 
-        if not fm_window:
+        if analytical:
             stats_translator = {'spectrum': 'mesh2_spectrum', 'window': 'window_mesh2_spectrum', 'covariance': 'covariance_mesh2_spectrum'}
             stats = [stats_translator[key] for key in args.todo]
             postprocess = ['combine_regions']
@@ -306,9 +321,8 @@ if __name__ == '__main__':
             if postprocess:
                 postprocess_stats(cat_dir=cat_dir, stats_dir=stats_dir, tracer=tracer, zranges=zranges, weights=weights, postprocess=postprocess, stats=stats)
 
-
-        # Compute RIC/AMR correction to the window matrix:
-        else:
+        # Forward model RIC/AMR correction to the window matrix:
+        if fm_window:
             assert not (('amr' in args.todo) and not ('ric' in args.todo)), 'Do not run AMR without RIC. Provide --ric --amr.'
 
             stats = ['window_mesh2_spectrum_fm']
@@ -341,3 +355,26 @@ if __name__ == '__main__':
                 kwargs['extra'] = 'RIC+AMR' if args.amr else 'RIC'
                 postprocess_stats(cat_dir=cat_dir, stats_dir=stats_dir, tracer=tracer, zranges=zranges, weights=weights, 
                                 postprocess=['combine_regions'], stats=['window_mesh2_spectrum'], **kwargs)
+
+        # Forward model shotnoise template:
+        elif fm_shotnoise:
+            stats = ['shotnoise_mesh2_spectrum_fm']
+            postprocess = ['combine_regions']
+            logger.info(f'Running {stats=} and {postprocess=}')
+
+            # Collect which region and redshift range are necessary to run the imaging systematic weights (need the full redshift range / footprint ..):
+            total_regions, total_zranges = tools.propose_fiducial(kind='shotnoise_mesh2_spectrum_fm', tracer=tracer)['total_region_zrange']
+            logger.info(f"Use region={total_regions} and zrange={total_zranges} for reading the catalogs.")
+
+            # Update options for forward shotnoise:
+            kwargs = {'spectrum_regions_zranges': list(itertools.product(regions, zranges))}
+            logger.info(f"shotnoise_mesh2_spectrum_fm kwargs: {kwargs}")
+
+            get_run_stats()(cat_dir=cat_dir, stats_dir=stats_dir, tracer=tracer, zranges=total_zranges, weights=weights, 
+                            regions=[total_regions], stats=stats, **kwargs)
+
+            if "combine_regions" in postprocess:
+                for extra in ['geometry', 'RIC+AMR']:
+                    kwargs['extra'] = extra
+                    postprocess_stats(cat_dir=cat_dir, stats_dir=stats_dir, tracer=tracer, zranges=zranges, weights=weights, 
+                                      postprocess=['combine_regions'], stats=['shotnoise_mesh2_spectrum_fm'], **kwargs)

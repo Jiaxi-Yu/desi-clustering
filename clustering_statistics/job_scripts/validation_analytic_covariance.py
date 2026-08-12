@@ -79,8 +79,10 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             method = 'smooth_mesh'
             window_mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None, 'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4)}
             window_mesh3_spectrum = {'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4), 'computed_batches': None} #[None]}
+            covariance_mesh3_spectrum = {'terms': 'PBT'}   # TEST: re-enable the trispectrum terms
             options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock), 
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
+                           covariance_mesh3_spectrum=covariance_mesh3_spectrum,
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
@@ -114,16 +116,16 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
 if __name__ == '__main__':
 
     stats, postprocess = [], []
-    version = 'holi-v3-altmtl'
-    #version = 'glam-uchuu-v2-altmtl'
+    #version = 'holi-v3-altmtl'
+    version = 'glam-uchuu-v2-altmtl'
     check_for_existing_measurements = False
 
     imocks = np.arange(25)
     #imocks = np.arange(5, 25)
     #imocks = np.arange(5, 9)
     #imocks = np.arange(1)
-    #imocks = [150]
-    imocks = [0]
+    imocks = [150]
+    #imocks = [0]
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
@@ -167,7 +169,7 @@ if __name__ == '__main__':
             # do not compute measurements for overlapping redshifts
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
-            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
+            zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
        
         def get_run_stats():
             if mode == 'interactive':
