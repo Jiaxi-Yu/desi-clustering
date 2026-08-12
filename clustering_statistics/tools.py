@@ -1254,6 +1254,30 @@ def get_catalog_fn(version=None, cat_dir=None, kind='data', tracer='LRG',
                 return base_dir / f'forFA{imock:d}.fits'
             if 'full' in kind:
                 cat_dir = cat_dir.parent
+
+        elif version == 'abacus-hf-dr2-v2':
+            assert 'QSO' in tracer
+            base_dir = desi_dir / f"mocks/cai/abacus_HF/DR2_v2.0"
+            cat_dir = base_dir / f"AbacusSummit_base_c000_ph{imock:03d}/CutSky/QSO_lorentzian/combined/abacus_HFv2/mock{imock:d}"
+            ext = 'h5'
+            if kind == 'data':
+                return cat_dir / f"QSO_complete_{region}_clustering.dat.{ext}"
+            elif kind == 'randoms':
+                return [cat_dir / f"QSO_complete_{region}_{iran:d}_clustering.ran.{ext}" for iran in nrans]
+            else:
+                raise NotImplementedError
+            
+        elif version == 'abacus-hf-dr2-v2-lorentzian':
+            assert 'QSO' in tracer
+            base_dir = Path('/pscratch/sd/a/arosado/mockchallenge/')
+            cat_dir = base_dir / f"abacus_HF/DR2_v2.0/AbacusSummit_base_c000_ph{imock:03d}/CutSky/QSO_lorentzian/combined/abacus_HFv2/mock{imock:d}/zsmear/"
+            ext = 'h5'
+            if kind == 'data':
+                return cat_dir / f"QSO_complete_{region}_clustering.dat.{ext}"
+            elif kind == 'randoms':
+                return [cat_dir / f"QSO_complete_{region}_{iran:d}_clustering.ran.{ext}" for iran in nrans]
+            else:
+                raise NotImplementedError
         
         elif 'abacus-hf-lc-dr2' in version:
             assert 'QSO' in tracer
@@ -2704,7 +2728,7 @@ def renormalize_randoms_over_data(randoms, data, tracer=None, regions=None):
         randoms['INDWEIGHT'][mask_randoms] *= alpha
 
 
-def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=()):
+def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=(), ignore_ftile=False):
     """
     Reshuffled random redshifts from (merged) data.
 
@@ -2748,7 +2772,10 @@ def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=())
         # <wcomp>(ntile)
         data_wcomp_ntile[region] = _compute_binned_weight(data_ntile, data_wtotp[mask_data] / data['WEIGHT'][mask_data])
         # <ftile>(ntile)
-        data_ftile_ntile[region] = _compute_binned_weight(data_ntile, data['FRAC_TLOBS_TILES'][mask_data])
+        if ignore_ftile:
+            data_ftile_ntile[region] = data[mask_data].ones()
+        else:
+            data_ftile_ntile[region] = _compute_binned_weight(data_ntile, data['FRAC_TLOBS_TILES'][mask_data])
         # Reconstruct n(z) from Eq. 7.4 of https://arxiv.org/pdf/2405.16593
         if merged_data is data:
             tmp_z = data['Z'][mask_data]
@@ -2761,7 +2788,10 @@ def reshuffle_randoms(randoms, merged_data, data, tracer, seed=42, from_data=())
             mask_merged_data = select_region(merged_data['RA'], merged_data['DEC'], region=region)
             merged_data_ntile = merged_data['NTILE'][mask_merged_data]
             merged_data_wcomp_ntile = _compute_binned_weight(merged_data_ntile, merged_data_wtotp[mask_merged_data] / merged_data['WEIGHT'][mask_merged_data])
-            merged_data_ftile_ntile = _compute_binned_weight(merged_data_ntile, merged_data['FRAC_TLOBS_TILES'][mask_merged_data])
+            if ignore_ftile:
+                merged_data_ftile_ntile = merged_data[mask_data].ones()
+            else:
+                merged_data_ftile_ntile = _compute_binned_weight(merged_data_ntile, merged_data['FRAC_TLOBS_TILES'][mask_merged_data])
             tmp_z = merged_data['Z'][mask_merged_data]
             tmp_nz = merged_data['NX'][mask_merged_data] / (merged_data_ftile_ntile[merged_data_ntile] / merged_data_wcomp_ntile[merged_data_ntile])
         zidx = np.digitize(tmp_z, zedges, right=False)
