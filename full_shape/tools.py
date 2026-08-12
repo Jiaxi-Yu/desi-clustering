@@ -357,10 +357,11 @@ def get_theory(stat: str, theory_options: dict, cosmology: object=None, data_att
     from desilike.base import params as get_params
     theory_options = dict(theory_options)
     # 'pdf' alone is entirely in the window; only the parametric suffix reaches the theory.
-    smearing_form = _get_redshift_smearing_form(redshift_smearing)
+    redshift_smearing = _format_redshift_smearing(redshift_smearing)
+    smearing_form = redshift_smearing['mode'].partition('+')[2] or None if redshift_smearing is not None else None
     if smearing_form is not None and theory_options['model'] not in ['folpsD', 'folpsEFT']:
-        raise NotImplementedError(f"redshift_smearing={redshift_smearing!r} adds a parametric damping, which "
-                                  f"model {theory_options['model']!r} does not support; use 'pdf' instead.")
+        raise NotImplementedError(f"redshift_smearing mode {redshift_smearing['mode']!r} adds a parametric damping, "
+                                  f"which model {theory_options['model']!r} does not support; use 'pdf' instead.")
     smearing_kw = {'redshift_smearing': _get_redshift_smearing_kernel(smearing_form)} if smearing_form else {}
     fiducial = get_fiducial()
     template = None
@@ -1257,14 +1258,6 @@ def _format_redshift_smearing(redshift_smearing):
         raise ValueError(f'redshift_smearing mode must be one of {list(allowed_modes)}, got {mode!r}')
     # the PDF depends on tracer and zrange only, so region is pinned to the one that was produced
     return {'project': 'auxiliary_data/redshift_smearing', 'version': 'data-dr2-v2', 'region': 'GCcomb'} | redshift_smearing
-
-
-def _get_redshift_smearing_form(redshift_smearing):
-    """Parametric damping form ('gauss', 'lor') of a formatted option, or None."""
-    redshift_smearing = _format_redshift_smearing(redshift_smearing)
-    if redshift_smearing is None:
-        return None
-    return redshift_smearing['mode'].partition('+')[2] or None
 
 
 def _get_redshift_smearing_kernel(form):
