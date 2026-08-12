@@ -31,19 +31,19 @@ kwargs = {}
 # environ = Environment('nersc-cosmodesi')
 environ = Environment('nersc-cosmodesi', command='export PYTHONPATH=$HOME/LSScode/dr2-clustering-analysis/:$PYTHONPATH')
 tm = TaskManager(queue=queue, environ=environ)
-tm = tm.clone(scheduler=dict(max_workers=30), provider=dict(provider='nersc', time='02:00:00',
-                            mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu'))
+tm = tm.clone(scheduler=dict(max_workers=20), provider=dict(provider='nersc', time='02:00:00',
+                                                            mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu', kwargs={'job-name': 'statsHoli'}))
 tm80 = tm.clone(provider=dict(provider='nersc', time='02:00:00',
-                            mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g'))
+                              mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g', kwargs={'job-name': 'statsHoli'}))
 tmw = tm.clone(scheduler=dict(max_workers=1), provider=dict(provider='nersc', time='00:10:00',
-                mpiprocs_per_worker=2250, nodes_per_worker=25, output=output, error=error, stop_after=1, constraint='cpu'))
+                                                            mpiprocs_per_worker=2250, nodes_per_worker=25, output=output, error=error, stop_after=1, constraint='cpu'))
 
 combine_region_sources = {
-    'GCcomb': ['NGC', 'SGC'],
-    'NS': ['N', 'S'],
-    'GCcomb_noN': ['NGCnoN', 'SGC'],
-    'GCcomb_noDES': ['NGC', 'SGCnoDES'],
-}
+        'GCcomb': ['NGC', 'SGC'],
+        'NS': ['N', 'S'],
+        'GCcomb_noN': ['NGCnoN', 'SGC'],
+        'GCcomb_noDES': ['NGC', 'SGCnoDES'],
+        }
 
 def run_stats(tracer='LRG', project='', version='holi-v3-altmtl', onthefly=None, imocks=[150], stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', stats=['mesh2_spectrum'], weight='default-FKP', analysis='full_shape', regions=['NGC','SGC'], ibatch=None, postprocess=None, zranges=None, **kwargs):
     # Everything inside this function will be executed on the compute nodes;
@@ -58,43 +58,45 @@ def run_stats(tracer='LRG', project='', version='holi-v3-altmtl', onthefly=None,
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '0.9'
     try: jax.distributed.initialize()
     except RuntimeError: print('Distributed environment already initialized')
-    else: print('Initializing distributed environment')
+else: print('Initializing distributed environment')
     from clustering_statistics import tools, setup_logging, compute_stats_from_options, fill_fiducial_options, postprocess_stats_from_options
     setup_logging()
-    
+
     cache = {}
     if zranges is None:
         raise ValueError('Please provide zranges.')
     for imock in imocks:
         for region in regions:
-            mesh2_spectrum = {'cut': True if 'shape' in analysis else None, 
-                              'auw': True if 'altmtl' in version and onthefly is None and 'shape' in analysis else None}
+            mesh2_spectrum = {}
+            #mesh2_spectrum = {'cut': True if 'shape' in analysis else None, 
+            #                  'auw': True if 'altmtl' in version and onthefly is None and 'shape' in analysis else None}
             window_mesh2_spectrum = {'cut': True if 'shape' in analysis else None}
-            
-            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock), 
+
+            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock),
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
                            window_mesh3_spectrum={'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch})
             options = fill_fiducial_options(options, analysis=analysis)
-            
+
             for i, itracer in enumerate(options['catalog']):
                 options['catalog'][itracer]['zranges'] = zranges # override fiducial zranges 
 
                 if isinstance(weight, tuple): weight_tracer = weight[i]
+                else: weight_tracer = weight
                 add_to_from_data = ['WEIGHT_' + weight_tracer.split('wsys-')[-1].upper()] if "wsys" in weight_tracer else []
                 options['catalog'][itracer]['expand']  = {'parent_randoms_fn': tools.get_catalog_fn(kind='parent_randoms', version='data-dr2-v2', tracer=itracer, nran=options['catalog'][itracer]['nran']), 'from_data': ['Z', 'WEIGHT_SYS', 'FRAC_TLOBS_TILES'] + add_to_from_data}
-
+                
                 if onthefly == 'complete':
                     options['catalog'][itracer]['complete'] = {}
                 elif onthefly == 'reshuffle':
                     merged_dir = tools.base_stats_dir / 'merged_catalogs' / version
-                    options['catalog'][itracer]['reshuffle'] = {'merged_data_fn': tools.get_catalog_fn(kind='data', cat_dir=merged_dir, **(options['catalog'][itracer] | dict(region='ALL')))}          
-            
+                    options['catalog'][itracer]['reshuffle'] = {'merged_data_fn': tools.get_catalog_fn(kind='data', cat_dir=merged_dir, **(options['catalog'][itracer] | dict(region='ALL')))}
+
             get_stats_fn = functools.partial(tools.get_stats_fn, stats_dir=stats_dir, project=project, extra=onthefly if onthefly else '')
             compute_stats_from_options(stats, analysis=analysis, get_stats_fn=get_stats_fn, cache=cache, **options)
 
     # postprocess
     if postprocess:
-        postprocess_options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, weight=weight, imock=imocks[0]), imocks=imocks, 
+        postprocess_options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, weight=weight, imock=imocks[0]), imocks=imocks,
                                    combine_regions={'stats': stats}, mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum)
         postprocess_stats_from_options(postprocess, analysis=analysis, get_stats_fn=get_stats_fn, **postprocess_options)
 
@@ -105,8 +107,9 @@ def postprocess_stats(tracer='LRG', analysis='full_shape', project='', version='
     if zranges is None:
         zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
     for region in regions:
-        options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imocks[0]), imocks=imocks, combine_regions={'stats': stats}, 
-                    mesh2_spectrum={'cut': True, 'auw': True}, window_mesh2_spectrum={'cut': True})
+        options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imocks[0]), imocks=imocks, combine_regions={'stats': stats},
+                       extra=onthefly if onthefly else '',
+                       mesh2_spectrum={'cut': True, 'auw': True}, window_mesh2_spectrum={'cut': True})
         options.update(combine_regions={'stats': stats, 'regions': combine_region_sources.get(region, ['NGC', 'SGC'])})
         stats_dir_kws = dict(stats_dir=stats_dir, project=project)
         if onthefly == 'complete':
@@ -122,50 +125,54 @@ if __name__ == '__main__':
 
     stats, postprocess = [], []
     # version  = 'holi-v3-altmtl'
-    version = 'holi-bgs-altmtl'
+    # version = 'holi-bgs-altmtl'
+    version = 'holi-v4-altmtl'
     check_for_existing_measurements = True
-    postprocess_only = False # If True, no measurements are performed and only postprocessing of existing measurements is handled.
-    
+    postprocess_only = False  # If True, no measurements are performed and only postprocessing of existing measurements is handled.
+
     # run on interactive node
     # mode = 'interactive'
     # imocks2run = np.arange(1)
     # stats_dir  = Path(os.getenv('SCRATCH')) / 'cai-dr2-benchmarks' 
     # check_for_existing_measurements = False
-    
+
     # to run job
     mode = 'slurm'
     # mode = 'interactive'
-    imocks2run = np.arange(0,1000)
+    # imocks2run = np.arange(0,1)
+    imocks2run = np.arange(1000)
     if version == 'holi-v3-altmtl':
         # do not perform measurements on dubious mocks
-        bad_imocks = np.loadtxt('../helper_scripts/dubious_holi-v3-altmtl.txt',dtype=int)
-        imocks2run = imocks2run[~np.isin(imocks2run,bad_imocks)]
+        #bad_imocks = np.loadtxt('../helper_scripts/dubious_holi-v3-altmtl.txt',dtype=int)
+        #imocks2run = imocks2run[~np.isin(imocks2run,bad_imocks)]
+        imocks2run = np.loadtxt('../helper_scripts/holi-v3-altmtl_dark-time_imocks_for_covariance.txt', dtype=int)[:50] # imocks for RIC and AMR
     stats_dir  = tools.base_stats_dir
 
     # run fiducial full_shape
-    # stats       = ['mesh2_spectrum', 'mesh3_spectrum', 'particle2_correlation']
-    # postprocess = ['combine_regions']
-    # analysis = 'full_shape'
-    # project  = f'{analysis}/base'
-    # weight   = 'default-FKP'
-    # regions  = ['NGC','SGC']
-    # # tracers  = ['QSO', 'ELG_LOPnotqso', 'LRG']
+    stats       = ['mesh2_spectrum', 'mesh3_spectrum']#, 'particle2_correlation']
+    postprocess = ['combine_regions']
+    analysis = 'full_shape'
+    project  = f'{analysis}/base'
+    weight   = 'default-FKP'
+    regions  = ['NGC','SGC']
+    tracers  = ['QSO','LRG','ELG_LOPnotqso']
     # tracers = ['BGS_BRIGHT-21.35']
-    # max_mocks_per_batch_qso = 20
-    # max_mocks_per_batch_others = 10
+    max_mocks_per_batch_qso = 20
+    max_mocks_per_batch_others = 10
+    postregions = ['GCcomb']
 
     # run data_splits for lensing group with full_shape setup 
-    stats   = ['mesh2_spectrum', 'mesh3_spectrum']
-    analysis = 'full_shape'
-    project = f'{analysis}/data_splits'
-    weight  = 'default-FKP'
+    # stats   = ['mesh2_spectrum', 'mesh3_spectrum']
+    # analysis = 'full_shape'
+    # project = f'{analysis}/data_splits'
+    # weight  = 'default-FKP'
     # regions = ['NGC', 'SGC'] # already computed under full_shape/base/
-    regions = ['N', 'NGCnoN', 'S', 'SGCnoDES'] # galactic and imaging regions
-    regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i}' for i in [40, 60]] # lensing regions
+    # regions = ['N', 'NGCnoN', 'S', 'SGCnoDES'] # galactic and imaging regions
+    # regions = regions + ['ACT_DR6', 'PLANCK_PR4'] + [f'GAL0{i}' for i in [40, 60]] # lensing regions
     # tracers = ['QSO', 'ELG_LOPnotqso', 'LRG']
-    tracers = ['BGS_BRIGHT-21.35']
-    max_mocks_per_batch_qso = 30
-    max_mocks_per_batch_others = 30
+    # tracers = ['BGS_BRIGHT-21.35']
+    # max_mocks_per_batch_qso = 30
+    # max_mocks_per_batch_others = 30
     # postprocess = ['combine_regions']
     # postregions = ['GCcomb', 'NS', 'GCcomb_noN', 'GCcomb_noDES'][1:]
 
@@ -179,13 +186,13 @@ if __name__ == '__main__':
     # tracers  = ['LRG', 'ELGnotqso', 'QSO', ('LRG','QSO'), ('LRG','ELGnotqso'), ('ELGnotqso','QSO')]
     # max_mocks_per_batch_others = max_mocks_per_batch_qso = 50
 
-    onthefly = None
-    
+    onthefly = None # 'reshuffle'
+
     for tracer in tracers:
         if tracer == 'QSO':
-             max_mocks_per_batch = max_mocks_per_batch_qso # allow mocks to be processed since QSOs only have one zbin
+            max_mocks_per_batch = max_mocks_per_batch_qso # allow mocks to be processed since QSOs only have one zbin
         else:
-             max_mocks_per_batch = max_mocks_per_batch_others
+            max_mocks_per_batch = max_mocks_per_batch_others
         if 'png' in analysis:
             # do not compute measurements for overlapping redshifts
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
@@ -209,7 +216,7 @@ if __name__ == '__main__':
         else:
             imocks = imocks2run
             rerun_by_region = {region: imocks for region in regions}
-       
+
         def get_run_stats():
             _tm = tm80
             if tracer in ['LRG','BGS_BRIGHT-21.35']:
@@ -253,3 +260,4 @@ if __name__ == '__main__':
             else:
                 imocks = imocks2run
             postprocess_stats(imocks=imocks, **(run_stats_kws | dict(regions=postregions)))
+
