@@ -175,8 +175,8 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'a
         if kind == 'data':
             state['data'] = catalogs
         elif kind == 'randoms':
-            for randoms in catalogs:
-                tools.renormalize_randoms_over_data(randoms, state['data'], regions=norm_regions)
+            for i, randoms in enumerate(catalogs):
+                catalogs[i] = tools.renormalize_randoms_over_data_regions(randoms, state['data'], regions=norm_regions)
         return catalogs
 
     onthefly = None
@@ -185,9 +185,10 @@ def run_stats(stats=('mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'a
     _get_stats_fn = functools.partial(get_stats_fn, stats_dir=stats_dir, project=project, imweight=imweight, onthefly=onthefly)
 
     for imock in imocks:
+        aic = None #'hp64'
         options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region,
                                     weight=f'default-FKP-wsys-{contweight}', imock=imock),
-                       mesh2_spectrum={'auw': False, 'cut': False}, mesh3_spectrum={'auw': False},
+                       mesh2_spectrum={'auw': False, 'cut': False, 'aic': aic}, mesh3_spectrum={'auw': False, 'aic': aic},
                        # Angular statistics: imaging systematics are an angular contamination, so
                        # these probe it directly. 'mattrs' is the angular geometry, ellmax = 180 ~ 1 deg;
                        # nside = None on the power spectrum selects the pixel-free direct summation.
@@ -218,14 +219,14 @@ if __name__ == '__main__':
     complete = None
     #complete = {}  # on-the-fly complete catalogs
     #complete = {'altmtl': True}  # on-the-fly altmtl catalogs
-    #tracer = 'QSO'
-    #zranges = [(0.8, 2.1)]
-    tracer = 'LRG'
-    zranges = [(0.4, 1.1)]
+    tracer = 'QSO'
+    zranges = [(0.8, 2.1)]
     #tracer = 'LRG'
-    #zranges = [(0.4, 0.6)]
+    #zranges = [(0.4, 1.1)]
+    #tracer = 'LRG'
+    #zranges = [(0.8, 1.1)]
     for imweight in imweights:
-        for contweight, gaussian in zip(['SYS', 'CONT', 'CONT'], [False, False, True]):
+        for contweight, gaussian in zip(['SYS', 'CONT', 'CONT'], [False, False, True][:1]):
             for region in ['NGC', 'SGC']:
-                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'][3:4], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
+                run_stats(stats=['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum'][:2], imweight=imweight, contweight=contweight, region=region, tracer=tracer, zranges=zranges, imocks=range(5), complete=complete, gaussian=gaussian)
                 #run_stats(stats=['window_mesh2_spectrum', 'window_mesh3_spectrum'], imweight=imweight, contweight=contweight, region=region, imocks=[0], complete=complete, gaussian=gaussian)

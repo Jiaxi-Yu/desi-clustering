@@ -569,7 +569,11 @@ def propose_fiducial(kind, tracer, zrange=None, analysis='full_shape'):
     propose_fiducial['covariance_mesh3_spectrum'] = dict(propose_fiducial['covariance_mesh2_spectrum'])
     _mattrs = propose_fiducial['covariance_mesh2_spectrum']['mattrs']
     propose_fiducial['covariance_mesh3_spectrum']['mattrs'] = {'meshsize': _mattrs['meshsize'] // 2, 'cellsize': 2. * _mattrs['cellsize']}
-    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PB'
+    # 'PBT', not 'PB': the trispectrum enters Cov[B, B] as the P x T term, one of the four
+    # terms of Sugiyama et al. Eq. 28. It is the most expensive part of the assembly, which
+    # is why it was once dropped, but cost is not a reason to omit a term of the formula.
+    # (Its effect on the P blocks is separately measured at < 1%.)
+    propose_fiducial['covariance_mesh3_spectrum']['terms'] = 'PBT'
     for name in ['covariance_mesh2_spectrum', 'covariance_particle2_correlation']:
         propose_fiducial[name.replace('covariance_', 'covariance_recon_')] = propose_fiducial[name]
 
@@ -2474,9 +2478,14 @@ def combine_stats(observables):
                 attrs[name] = sum([list(observable.attrs[name]) for observable in observables], start=[])
         name = 'zeff'
         if name in attrs:
-            norm_zeff = [observable.attrs[f'norm_{name}'] for observable in observables]
-            attrs[name] = np.average([observable.attrs[name] for observable in observables], weights=norm_zeff)
-            attrs[f'norm_{name}'] = np.sum(norm_zeff)
+            if all(f'norm_{name}' in observable.attrs for observable in observables):
+                norm_zeff = [observable.attrs[f'norm_{name}'] for observable in observables]
+                attrs[name] = np.average([observable.attrs[name] for observable in observables], weights=norm_zeff)
+                attrs[f'norm_{name}'] = np.sum(norm_zeff)
+            else:
+                # Cannot recombine; better no effective redshift than the first input's one
+                attrs.pop(name)
+                attrs.pop(f'norm_{name}', None)
         return attrs
 
     def combine_attrs(observable, observables):
@@ -2485,7 +2494,10 @@ def combine_stats(observables):
     # Combine attributes
     if isinstance(observable, (types.WindowMatrix, types.CovarianceMatrix)):
         window = observable
-        observable = window = window.clone(observable=combine_attrs(window.observable, [window.observable for window in observables]))
+        # Matrices carry their own attrs, on top of those of the observable they are attached to:
+        # both must be recombined, else the matrix-level attrs are silently those of the first input.
+        observable = window = window.clone(observable=combine_attrs(window.observable, [window.observable for window in observables]),
+                                           attrs=_combine_attrs(observables))
     else:
         observable = combine_attrs(observable, [observable for observable in observables])
 

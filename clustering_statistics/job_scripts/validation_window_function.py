@@ -29,7 +29,7 @@ mode = 'interactive'
 if mode == 'slurm':
     queue = Queue('window_function2')
     queue.clear(kill=False)
-    
+
     output, error = 'slurm_outputs/abacus_mocks/slurm-%j.out', 'slurm_outputs/abacus_mocks/slurm-%j.err'
     kwargs = {}
     environ = Environment('nersc-cosmodesi', command=['module unload desi-clustering cucount jaxpower'])
@@ -43,13 +43,14 @@ if mode == 'slurm':
     tmw = tm.clone(provider=dict(provider='nersc', time='04:00:00',
                                 mpiprocs_per_worker=4, output=output, error=error, stop_after=1, constraint='gpu&hbm80g'))
 
-def get_stats_fn(*args, extra='', onthefly=None, method=None, **kwargs):
+def get_stats_fn(kind='mesh2_spectrum', extra='', onthefly=None, method=None, **kwargs):
     from clustering_statistics import tools
+    #if 'window' not in kind: method = None
     extra = [txt for txt in [extra, onthefly, method] if txt]
-    return tools.get_stats_fn(*args, extra='_'.join(extra), **kwargs)
+    return tools.get_stats_fn(kind=kind, extra='_'.join(extra), **kwargs)
 
 
-def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthefly=None, imocks=[150], stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', stats=['mesh2_spectrum'], weight='default-FKP', analysis='full_shape', regions=['NGC','SGC'], ibatch=None, zranges=None, get_stats_fn=get_stats_fn, **kwargs):
+def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthefly=None, imocks=[150], stats_dir=Path(os.getenv('SCRATCH')) / 'measurements', stats=['mesh2_spectrum'], weight='default-FKP', analysis='full_shape', regions=['NGC','SGC'], ibatch=None, reuse_raw=False, window_method='smooth_particle', zranges=None, get_stats_fn=get_stats_fn, **kwargs):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -72,26 +73,36 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
         raise ValueError('Please provide zranges.')
     for imock in imocks:
         for region in regions:
-            mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None, 
+            mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None,
                               'auw': None}
             window_mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None}
             #mesh3_spectrum = {'auw': None}
             mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
-            window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
             particle2_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 40., 41), mu=(np.linspace(-1., 1., 201), 'midpoint'))}
             particle3_correlation = {'split_randoms': (2., 10), 'battrs': dict(s=np.linspace(0., 20., 21), pole=(list(range(6)), 'firstpoint'))}
-            method = 'smooth_mesh'
+            # 'smooth_particle' computes the window correlation from RRR particle counts, which is
+            # what gives access to the HIGHER-ORDER window multipoles.
+            method = window_method
             window_mesh2_spectrum = {'cut': True if 'full_shape' in analysis else None, 'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4)}
-            window_mesh3_spectrum = {'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4), 'computed_batches': None} #[None]}
-            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock), 
+            window_mesh3_spectrum = {'method': method, 'split_randoms': (20, 2 if 'ELG' in tracer else 4)}
+            if 'particle' in method: window_mesh3_spectrum |= {'ellwmax': 2}
+            # window_mesh3_spectrum |= {'ellwmax': window_ellwmax}
+            # window_mesh3_spectrum |= {'ellmax': window_ellmax}
+            # ibatch splits the window MULTIPOLES over jobs: a tuple computes one batch of raw
+            # correlations only, an int assembles the matrix from the batches computed before.
+            window_mesh3_spectrum |= {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
+            # reuse_raw rebuilds the MATRIX ONLY, from the unbatched raw correlation already on disk
+            if reuse_raw:
+                window_mesh3_spectrum |= {'computed_batches': [None]}
+            options = dict(catalog=dict(version=version, tracer=tracer, zrange=zranges, region=region, weight=weight, imock=imock),
                            mesh2_spectrum=mesh2_spectrum, window_mesh2_spectrum=window_mesh2_spectrum,
                            mesh3_spectrum=mesh3_spectrum, window_mesh3_spectrum=window_mesh3_spectrum,
                            particle2_correlation=particle2_correlation,
                            particle3_correlation=particle3_correlation)
             options = fill_fiducial_options(options, analysis=analysis)
-            
+
             for itracer in options['catalog']:
-                options['catalog'][itracer]['zranges'] = zranges  # override fiducial zranges 
+                options['catalog'][itracer]['zranges'] = zranges  # override fiducial zranges
                 options['catalog'][itracer]['expand'] = {'parent_randoms_fn': tools.get_catalog_fn(kind='parent_randoms', version='data-dr2-v2', tracer=itracer, nran=options['catalog'][itracer]['nran'])}
                 if onthefly is not None and onthefly.startswith('complete'):
                     options['catalog'][itracer]['complete'] = {'with_completeness': 'nocomp' not in onthefly, 'with_tracer_cuts': True}
@@ -121,7 +132,7 @@ if __name__ == '__main__':
     # version = 'abacus-2ndgen-dr2-altmtl'
     check_for_existing_measurements = False
 
-    imocks = np.arange(6, 25)
+    imocks = np.arange(25)
     #imocks = np.arange(5, 25)
     #imocks = np.arange(5, 9)
     #imocks = np.arange(1)
@@ -129,7 +140,7 @@ if __name__ == '__main__':
     stats_dir = tools.base_stats_dir
 
     # run fiducial full_shape
-    tracers = ['LRG', 'ELG', 'QSO'][1:]
+    tracers = ['LRG', 'ELG', 'QSO']
     #tracers = ['LRG']
     #tracers = ['QSO']
 
@@ -137,11 +148,11 @@ if __name__ == '__main__':
     #version = 'abacus-2ndgen-dr2-altmtl'
     #tracers = ['BGS']
 
-    # run data_splits for lensing group with full_shape setup 
+    # run data_splits for lensing group with full_shape setup
     #stats = ['mesh2_spectrum', 'mesh3_spectrum']
     #stats = ['window_mesh2_spectrum', 'window_mesh3_spectrum']
     #stats = ['mesh2_spectrum', 'window_mesh2_spectrum']
-    stats = ['mesh3_spectrum', 'window_mesh3_spectrum'][:1]
+    stats = ['mesh3_spectrum', 'window_mesh3_spectrum']
     #stats = ['particle3_correlation']
     postprocess = ['combine_regions'][:0]
     analysis = 'full_shape'
@@ -158,7 +169,7 @@ if __name__ == '__main__':
     #onthefly = 'complete-samenz'
     #onthefly = 'complete-fixnz'
     onthefly = 'complete'
-    
+
     for tracer in tracers:
         tracer = tools.get_full_tracer(tracer, version=version)
         if 'png' in analysis:
@@ -166,7 +177,7 @@ if __name__ == '__main__':
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
         else:
             zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
-       
+
         def get_run_stats():
             if mode == 'interactive':
                 return run_stats
@@ -182,13 +193,18 @@ if __name__ == '__main__':
             if any('window' in stat for stat in stats):
                 _imocks = [0]
                 nbatches = 1
-                tasks = []
-                for ibatch in range(nbatches):
-                    task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
-                    tasks.append(task)
                 if nbatches > 1:
+                    # Compute the window multipoles in batches, then assemble the matrix
+                    tasks = []
+                    for ibatch in range(nbatches):
+                        task = get_run_stats()(imocks=_imocks, ibatch=(ibatch, nbatches), stats=stats, **run_stats_kws)
+                        tasks.append(task)
                     # Add dependence on other tasks
                     get_run_stats()(imocks=_imocks, ibatch=nbatches, tasks=tasks, stats=stats, **run_stats_kws)
+                else:
+                    # ibatch=None: correlations and matrix in one go. Batching here would return
+                    # the raw correlations only, and nothing would assemble them into a matrix.
+                    get_run_stats()(imocks=_imocks, ibatch=None, stats=stats, **run_stats_kws)
             elif any('covariance' in stat for stat in stats):
                 get_run_stats()(imocks=[0], stats=stats, **run_stats_kws)
             elif stats:

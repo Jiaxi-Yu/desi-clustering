@@ -5,7 +5,7 @@ Main functions
 --------------
 * `compute_particle2_correlation`: Measure the cutsky 2PCF from pair counts (includes jackknife utility).
 * `compute_particle2_angular_upweights`: Derive angular upweights for fiber-collision mitigation.
-* `compute_box_particle2_correlation`: Measure the 2PCF in cubic boxes.
+* `compute_box_particle2_correlation`: Measure the 2PCF in cubic boes.
 """
 
 import logging

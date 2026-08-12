@@ -1003,8 +1003,11 @@ def compute_stats_from_options(stats, analysis='full_shape', cache=None,
             if theory is None:
                 # Effective redshift: measured spectra carry no 'zeff' (only window matrices
                 # do); run_preliminary_fit_mesh3_spectrum reads it directly from window2.
+                # cut=False to match the raw (cut=False) spectrum2 read above: the window is now
+                # used to convolve the P model, not only as the source of zeff, so a thetacut
+                # window against an uncut measurement would bias the fit.
                 window_fn = get_stats_fn(kind='window_mesh2_spectrum', catalog=fn_catalog_options[tracer],
-                                         **(options['window_mesh2_spectrum'] | dict(auw=False)))
+                                         **(options['window_mesh2_spectrum'] | dict(auw=False, cut=False)))
                 window2 = types.read(window_fn)
                 # Fit bias parameters on the joint (P, B) data vector
                 theory = run_preliminary_fit_mesh3_spectrum(spectrum2, spectrum3, window2=window2)

@@ -4,8 +4,7 @@ To create and spawn the tasks on NERSC, use the following commands:
 ```bash
 salloc -N 1 -C gpu -t 02:00:00 --gpus 4 --qos interactive --account desi_g
 source /global/common/software/desi/users/adematti/cosmodesi_environment.sh main
-python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 --stats mesh2_spectrum mesh3_spectrum --todo build
-srun -n 4 python validation_abacus_mocks.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 LRG2 LRG3 ELG2 --stats mesh2_spectrum mesh3_spectrum--todo sample --nchains 4
+srun -n 4 python comparison_folpsD_comet.py --dataset abacus-2ndgen-dr2-complete --tracers LRG1 --stats mesh2_spectrum --todo sample --nchains 4
 ```
 """
 import argparse
@@ -20,8 +19,7 @@ from full_shape import tools, setup_logging
 setup_logging()
 
 
-THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors', 'comet']
-REDSHIFT_SMEARINGS = ['pdf', 'pdf+gauss', 'pdf+lor']
+THEORY_MODELS = ['folpsD', 'folpsEFT', 'reptvelocileptors', 'comet', 'cometEFT']
 COSMO_MODELS = ['base', 'base_ns-fixed', 'fixed', 'base_w_wa']
 PRIOR_BASES = ['physical', 'physical_aap', 'tcm_chudaykin_aap', 'standard']
 SAMPLERS = ['emcee', 'zeus', 'mhmcmc', 'nuts', 'pocomc', 'nautilus', 'numpyro_nuts', 'numpyro_barker']
@@ -36,8 +34,8 @@ LOCAL_SAFE_THREAD_ENV = {
 }
 KRANGES = {
     'mesh2_spectrum': [
-        {'ells': 0, 'k': [0.02, 0.35, 0.01]},
-        {'ells': 2, 'k': [0.02, 0.25, 0.01]},
+        {'ells': 0, 'k': [0.02, 0.20, 0.01]},
+        {'ells': 2, 'k': [0.02, 0.20, 0.01]},
     ],
     'mesh3_spectrum': [
         {'ells': (0, 0, 0), 'k': [0.02, 0.10, 0.01]},
@@ -46,14 +44,9 @@ KRANGES = {
 }
 
 
-def _validate_theory_model(stats, theory_model, redshift_smearing=None):
+def _validate_theory_model(stats, theory_model):
     if theory_model == 'reptvelocileptors' and 'mesh3_spectrum' in stats:
         raise ValueError('theory model reptvelocileptors is only supported with mesh2_spectrum')
-    # 'pdf' is folded into the window, so any model takes it; the '+gauss' / '+lor' suffixes add
-    # a parametric damping to the theory, which only the folps models accept.
-    if redshift_smearing and '+' in redshift_smearing and theory_model not in ['folpsD', 'folpsEFT']:
-        raise ValueError(f'redshift smearing {redshift_smearing} adds a parametric damping, which theory model '
-                         f'{theory_model} does not support; use pdf instead')
 
 
 def _apply_kranges(observable_options):
@@ -67,9 +60,8 @@ def _apply_kranges(observable_options):
 
 
 def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
-                               syst_templates=tuple(), emulator=True, prior_basis='physical_aap',
-                               redshift_smearing=None):
-    _validate_theory_model(stats, theory_model, redshift_smearing=redshift_smearing)
+                               syst_templates=tuple(), emulator=True, prior_basis='physical_aap', use_gtns=False):
+    _validate_theory_model(stats, theory_model)
     likelihoods = []
     for tracer in tracers:
         _version, _covariance = version, covariance
@@ -85,17 +77,20 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
             covariance=_covariance,
             stats_dir=stats_dir,
             project=project,
-            emulator=emulator and theory_model != 'comet',
+            emulator=emulator and 'comet' not in theory_model,
         )
         for observable_options in likelihood_options['observables']:
             _apply_kranges(observable_options)
             observable_options['window']['templates'] = syst_templates
-            if redshift_smearing:
-                observable_options['redshift_smearing'] = redshift_smearing
             observable_options.setdefault('theory', {})
             observable_options['theory']['model'] = theory_model
             #observable_options['theory']['marg'] = False
             observable_options['theory']['prior_basis'] = prior_basis
+            if use_gtns:
+                # Keep the perturbative FoG term GTNS in the damped loop bracket. In the EFT
+                # limit (X_FoG = 0) there is no tree-level damping to resum it, so folps' default
+                # of dropping it is a different model from comet's 'EFT', which keeps it.
+                observable_options['theory']['use_GTNS'] = True
         likelihood_options['covariance']['source'] = 'mock'
         likelihood_options['covariance']['project'] = 'full_shape/base'
         likelihoods.append(likelihood_options)
@@ -104,8 +99,7 @@ def _build_likelihoods_options(stats, tracers, version, covariance, stats_dir, p
 
 def _build_run_options(stats, tracers, version, covariance, stats_dir, project, theory_model,
                        cosmo_model='base', template='direct', sampler='emcee', nchains=1,
-                       resume=False, prior_basis='physical_aap', emulator=True, syst_templates=tuple(),
-                       redshift_smearing=None):
+                       resume=False, prior_basis='physical_aap', emulator=True, syst_templates=tuple(), use_gtns=False):
     options = {}
     options['likelihoods'] = _build_likelihoods_options(
         stats=stats,
@@ -118,11 +112,24 @@ def _build_run_options(stats, tracers, version, covariance, stats_dir, project, 
         prior_basis=prior_basis,
         emulator=emulator,
         syst_templates=syst_templates,
-        redshift_smearing=redshift_smearing,
+        use_gtns=use_gtns,
     )
     options['cosmology'] = {'template': template, 'model': cosmo_model, 'engine': 'eisenstein_hu' if 'comet' in theory_model else 'class'}
+    if 'comet' in theory_model:
+        # comet reads the cosmological parameters straight into its own emulator and runs no
+        # Boltzmann section, so sigma8_m / sigma8_cb / rs_drag cannot be derived along the way.
+        # H0 and Omega_m follow from the sampled parameters alone and are kept.
+        options['cosmology']['derived'] = ['H0', 'Omega_m']
+    if 'comet' in theory_model:
+        # comet is a GP emulator: its interpolation error makes chi2 non-smooth at the ~1e-3
+        # level, so HESSE's default ~1e-8 finite-difference steps measure that structure rather
+        # than the curvature, and return an all-NaN covariance. Tell iminuit the effective
+        # precision so it steps far enough out to see real signal. folps' Taylor emulator is a
+        # polynomial and needs no such treatment.
+        options['profiler'] = tools.propose_fiducial_profiler_options()
+        options['profiler']['init']['precision'] = 1e-4
     options['sampler'] = tools.propose_fiducial_sampler_options(sampler=sampler)
-    sampler_kw = {'nparallel': nchains, 'gelman_rubin': 1.03, 'ess': 600}
+    sampler_kw = {'nparallel': nchains, 'gelman_rubin': 1.03, 'ess': 500}
     for section in ['init', 'run']:
         for name, value in options['sampler'][section].items():
             if name in sampler_kw:
@@ -146,8 +153,8 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
             cache_dir=DEFAULT_CACHE_DIR,
             stats=['mesh2_spectrum'], tracers=None, theory_model='folpsD',
             cosmo_model='base', sampler='emcee', nchains=1, resume=False,
-            syst_templates=tuple(), redshift_smearing=None, prior_basis='physical_aap', emulator=True,
-            local_safe_threads=False):
+            syst_templates=tuple(), prior_basis='physical_aap', emulator=True, local_safe_threads=False,
+            use_gtns=False):
     # Everything inside this function will be executed on the compute nodes;
     # This function must be self-contained; and cannot rely on imports from the outer scope.
     import os
@@ -185,7 +192,7 @@ def run_fit(actions=('profile',), template='direct', version='abacus-2ndgen-dr2-
         prior_basis=prior_basis,
         emulator=emulator,
         syst_templates=syst_templates,
-        redshift_smearing=redshift_smearing,
+        use_gtns=use_gtns,
     )
     get_fits_fn = functools.partial(tools.get_fits_fn, fits_dir=fits_dir)
     cache_dir = Path(cache_dir)
@@ -242,16 +249,15 @@ def _get_parser():
                         help=f'Base directory for clustering statistics.')
     parser.add_argument('--syst_templates', type=str, nargs='*', default=[], choices=['auw', 'amr', 'ric'],
                         help=f'Systematic templates.')
-    parser.add_argument('--redshift_smearing', type=str, default=None, choices=REDSHIFT_SMEARINGS,
-                        help='Redshift-smearing model. pdf folds the measured redshift-error PDF into the '
-                             'window matrix; pdf+gauss / pdf+lor additionally fit a parametric damping with a '
-                             'free vsmear [Mpc/h], which only folpsD / folpsEFT support. Defaults to none.')
     parser.add_argument('--cache_dir', type=str, default=DEFAULT_CACHE_DIR,
                         help=f'Base directory for cached prepared stats and emulators. Defaults to {DEFAULT_CACHE_DIR}.')
     parser.add_argument('--nchains', type=int, default=1,
                         help='Number of MCMC chains to run with desilike. Defaults to 1.')
     parser.add_argument('--resume', action='store_true',
                         help='Resume sampling from existing chain files in the derived fits directory.')
+    parser.add_argument('--use_gtns', action='store_true',
+                        help='Keep the perturbative FoG term GTNS in folps'"'"' damped loop bracket, matching '
+                             'comet'"'"'s structure. Only meaningful for folps models.')
     parser.add_argument('--no_emulator', action='store_true',
                         help='Disable Taylor emulators and evaluate the theory directly. '
                              'Useful for fixed-cosmology, nuisance-only fits.')
@@ -271,10 +277,9 @@ if __name__ == '__main__':
     covariance = 'holi-v3-altmtl'
     stats_dir = Path(args.stats_dir)
     cache_dir = Path(args.cache_dir)
-    _validate_theory_model(args.stats, args.theory_model, redshift_smearing=args.redshift_smearing)
+    _validate_theory_model(args.stats, args.theory_model)
     run_fit(actions=args.todo, version=version, covariance=covariance, stats_dir=stats_dir, project=args.project,
             fits_dir=fits_dir, cache_dir=cache_dir, stats=args.stats, tracers=args.tracers, theory_model=args.theory_model,
-            syst_templates=args.syst_templates, redshift_smearing=args.redshift_smearing,
-            cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
-            resume=args.resume, prior_basis=args.prior_basis,
+            syst_templates=args.syst_templates, cosmo_model=args.cosmo_params, sampler=args.sampler, nchains=args.nchains,
+            resume=args.resume, prior_basis=args.prior_basis, use_gtns=args.use_gtns,
             local_safe_threads=args.local_safe_threads, emulator=not args.no_emulator)

@@ -69,10 +69,11 @@ def run_stats(tracer='LRG', project='', version='abacus-hf-dr2-v2-altmtl', onthe
             correction = any('close_pair_correction' in stat or 'window' in stat for stat in stats) # run AUW or theta-cut only when asking for close_pair_correction
             auw = correction and ('altmtl' in version and onthefly is None or 'data' in version)
             cut = correction
-            mesh2_spectrum = {'cut': cut, 'auw': auw}
+            aic = 'hp64'
+            mesh2_spectrum = {'cut': cut, 'auw': auw, 'aic': aic}
             window_mesh2_spectrum = {'cut': cut}
-            mesh3_spectrum = {'auw': auw}
-            mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
+            mesh3_spectrum = {'auw': auw, 'aic': aic}
+            #mesh3_spectrum = {'basis': 'scoccimarro', 'ells': [0, 2], 'buffer_size': 5 if 'LRG' in tracer else 0}
             window_mesh3_spectrum = {'ibatch': ibatch} if isinstance(ibatch, tuple) else {'computed_batches': ibatch}
             # Angular statistics, up to ellmax = 180 ~ 1 deg (ell = 180 deg / theta).
             # nside = 256 keeps ellmax well below 2 * nside, which matters most for the bispectrum:
@@ -194,14 +195,14 @@ if __name__ == '__main__':
     #tracers = [('LRG', 'ELG')]
     #tracers = ['ELG', 'LRG'][:1]
     #tracers = ['QSO']
-    tracers = ['LRG', 'QSO'][:1]
+    tracers = ['LRG', 'QSO']
     # run BGS
     #version = 'abacus-2ndgen-dr2-altmtl'
     #tracers = ['BGS_BRIGHT']
     #tracers = ['BGS_BRIGHT-02']
     #tracers = ['BGS_ANY-02']
 
-    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][2:4]
+    stats = ['mesh2_spectrum', 'mesh3_spectrum', 'angular2_spectrum', 'angular3_spectrum', 'window_mesh2_spectrum', 'window_mesh3_spectrum'][:2]
     postprocess = ['combine_regions']
     #postprocess = ['systematic_templates']
     #weight = 'default-FKP'
@@ -231,7 +232,7 @@ if __name__ == '__main__':
                 zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)[:1]
             else:
                 zranges = tools.propose_fiducial('zranges', tracer, analysis=analysis)
-            zranges = [(0.4, 1.1)]
+            #zranges = [(0.4, 1.1)]
             #zranges = [(0.8, 2.1), (0.8, 1.6), (1.6, 2.1), (0.8, 1.4), (1.4, 2.1)][3:]
     
             def get_run_stats():
